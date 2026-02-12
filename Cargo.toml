@@ -1,0 +1,24 @@
+[package]
+authors = ["Takahiro Sato <harehare1110@gmail.com>"]
+categories = ["command-line-utilities", "text-processing"]
+description = "Documentation generator for mq functions and macros"
+edition = "2024"
+homepage = "https://mqlang.org/"
+keywords = ["markdown", "jq", "query", "mq"]
+license = "MIT"
+name = "mq-docs"
+readme = "README.md"
+repository = "https://github.com/harehare/mq"
+version = "0.5.14"
+
+[dependencies]
+clap = {version = "4.5.58", features = ["derive"]}
+itertools = "0.14.0"
+miette = {version = "7.6.0", features = ["fancy"]}
+mq-hir = "0.5.14"
+mq-lang = "0.5.14"
+url = "2.5.8"
+
+[[bin]]
+name = "mq-docs"
+path = "src/main.rs"
