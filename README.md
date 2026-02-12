@@ -1,6 +1,8 @@
-# mq-docs
+<h1 align="center">mq-docs</h1>
 
 A documentation generator for [mq](https://github.com/harehare/mq) functions, macros, and selectors. Generates reference documentation from built-in definitions or custom `.mq` files in multiple output formats.
+
+![mq-docs](./assets/mq-docs.jpg)
 
 ## Features
 
