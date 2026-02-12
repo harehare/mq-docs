@@ -18,21 +18,26 @@ A documentation generator for [mq](https://github.com/harehare/mq) functions, ma
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/harehare/mq-docs/main/bin/install.sh | bash
-# Install from crates.io
-cargo install mq-docs
-# Install using binstall
-cargo binstall mq-docs@0.1.0
 ```
 
 The installer will:
 - Download the latest release for your platform
 - Verify the binary with SHA256 checksum
-- Install to `~/.mq-tui/bin/`
+- Install to `~/.mq-check/bin/`
 - Update your shell profile (bash, zsh, or fish)
 
 After installation, restart your terminal or run:
 ```bash
 source ~/.bashrc  # or ~/.zshrc, or ~/.config/fish/config.fish
+```
+
+### Cargo
+
+```bash
+# Install from crates.io
+cargo install mq-docs
+# Install using binstall
+cargo binstall mq-docs@0.1.0
 ```
 
 ### From Source
@@ -43,7 +48,6 @@ cd mq-docs
 cargo build --release
 # Binary will be at target/release/mq-docs
 ```
-
 
 ## Usage
 
@@ -70,12 +74,12 @@ mq-docs -F text
 
 #### Options
 
-| Option | Description |
-|---|---|
-| `[FILES]` | Input `.mq` files to generate documentation from |
-| `-M, --module-names <NAME>` | Module names to load (repeatable) |
-| `-F, --format <FORMAT>` | Output format: `markdown`, `text`, or `html` (default: `markdown`) |
-| `-B, --include-builtin` | Include built-in functions alongside modules/files |
+| Option                      | Description                                                        |
+| --------------------------- | ------------------------------------------------------------------ |
+| `[FILES]`                   | Input `.mq` files to generate documentation from                   |
+| `-M, --module-names <NAME>` | Module names to load (repeatable)                                  |
+| `-F, --format <FORMAT>`     | Output format: `markdown`, `text`, or `html` (default: `markdown`) |
+| `-B, --include-builtin`     | Include built-in functions alongside modules/files                 |
 
 ### Library
 
