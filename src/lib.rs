@@ -41,7 +41,7 @@ pub fn generate_docs(
             hir.add_code(None, "");
             docs.push(ModuleDoc {
                 name: "Built-in".to_string(),
-                symbols: extract_symbols(&hir),
+                symbols: extract_symbols(&hir, None),
                 selectors: extract_selectors(&hir),
             });
         }
@@ -51,10 +51,10 @@ pub fn generate_docs(
                 let mut hir = mq_hir::Hir::default();
                 hir.builtin.disabled = true;
                 let url = Url::parse(&format!("file:///{filename}")).ok();
-                hir.add_code(url, content);
+                let (source_id, _) = hir.add_code(url, content);
                 docs.push(ModuleDoc {
                     name: filename.clone(),
-                    symbols: extract_symbols(&hir),
+                    symbols: extract_symbols(&hir, Some(&source_id)),
                     selectors: extract_selectors(&hir),
                 });
             }
@@ -65,9 +65,22 @@ pub fn generate_docs(
                 let mut hir = mq_hir::Hir::default();
                 hir.builtin.disabled = true;
                 hir.add_code(None, &format!("include \"{module_name}\""));
+
+                let source_id = hir.symbols().find_map(|(_, symbol)| {
+                    if let mq_hir::Symbol {
+                        kind: mq_hir::SymbolKind::Include(module_source_id),
+                        ..
+                    } = &symbol
+                    {
+                        Some(module_source_id)
+                    } else {
+                        None
+                    }
+                });
+
                 docs.push(ModuleDoc {
                     name: module_name.clone(),
-                    symbols: extract_symbols(&hir),
+                    symbols: extract_symbols(&hir, source_id),
                     selectors: extract_selectors(&hir),
                 });
             }
@@ -79,7 +92,7 @@ pub fn generate_docs(
         hir.add_code(None, "");
         vec![ModuleDoc {
             name: "Built-in functions and macros".to_string(),
-            symbols: extract_symbols(&hir),
+            symbols: extract_symbols(&hir, None),
             selectors: extract_selectors(&hir),
         }]
     };
@@ -92,34 +105,50 @@ pub fn generate_docs(
 }
 
 /// Extract function and macro symbols from HIR.
-fn extract_symbols(hir: &mq_hir::Hir) -> VecDeque<[String; 4]> {
+fn extract_symbols(
+    hir: &mq_hir::Hir,
+    source_id: Option<&mq_hir::SourceId>,
+) -> VecDeque<[String; 4]> {
     hir.symbols()
         .sorted_by_key(|(_, symbol)| symbol.value.clone())
-        .filter_map(|(_, symbol)| match symbol {
-            mq_hir::Symbol {
-                kind: mq_hir::SymbolKind::Function(params),
-                value: Some(value),
-                doc,
-                ..
+        .filter_map(|(_, symbol)| {
+            if let Some(sid) = source_id
+                && let Some(symbol_sid) = symbol.source.source_id
+                && symbol_sid != *sid
+            {
+                return None;
             }
-            | mq_hir::Symbol {
-                kind: mq_hir::SymbolKind::Macro(params),
-                value: Some(value),
-                doc,
-                ..
-            } if !symbol.is_internal_function() => {
-                let name = if symbol.is_deprecated() {
-                    format!("~~`{}`~~", value)
-                } else {
-                    format!("`{}`", value)
-                };
-                let description = doc.iter().map(|(_, d)| d.to_string()).join("\n");
-                let args = params.iter().map(|p| format!("`{}`", p.name)).join(", ");
-                let example = format!("{}({})", value, params.iter().map(|p| p.name.as_str()).join(", "));
 
-                Some([name, description, args, example])
+            match symbol {
+                mq_hir::Symbol {
+                    kind: mq_hir::SymbolKind::Function(params),
+                    value: Some(value),
+                    doc,
+                    ..
+                }
+                | mq_hir::Symbol {
+                    kind: mq_hir::SymbolKind::Macro(params),
+                    value: Some(value),
+                    doc,
+                    ..
+                } if !symbol.is_internal_function() => {
+                    let name = if symbol.is_deprecated() {
+                        format!("~~`{}`~~", value)
+                    } else {
+                        format!("`{}`", value)
+                    };
+                    let description = doc.iter().map(|(_, d)| d.to_string()).join("\n");
+                    let args = params.iter().map(|p| format!("`{}`", p.name)).join(", ");
+                    let example = format!(
+                        "{}({})",
+                        value,
+                        params.iter().map(|p| p.name.as_str()).join(", ")
+                    );
+
+                    Some([name, description, args, example])
+                }
+                _ => None,
             }
-            _ => None,
         })
         .collect()
 }
@@ -146,8 +175,16 @@ fn extract_selectors(hir: &mq_hir::Hir) -> VecDeque<[String; 2]> {
 
 /// Format documentation as a Markdown table.
 fn format_markdown(module_docs: &[ModuleDoc]) -> Result<String, miette::Error> {
-    let all_symbols: VecDeque<_> = module_docs.iter().flat_map(|m| m.symbols.iter()).cloned().collect();
-    let all_selectors: VecDeque<_> = module_docs.iter().flat_map(|m| m.selectors.iter()).cloned().collect();
+    let all_symbols: VecDeque<_> = module_docs
+        .iter()
+        .flat_map(|m| m.symbols.iter())
+        .cloned()
+        .collect();
+    let all_selectors: VecDeque<_> = module_docs
+        .iter()
+        .flat_map(|m| m.selectors.iter())
+        .cloned()
+        .collect();
 
     let mut doc_csv = all_symbols
         .iter()
@@ -178,7 +215,9 @@ fn format_markdown(module_docs: &[ModuleDoc]) -> Result<String, miette::Error> {
         let mut selector_csv = all_selectors
             .iter()
             .map(|[name, description]| {
-                mq_lang::RuntimeValue::String([name.as_str(), description.as_str()].into_iter().join("\t"))
+                mq_lang::RuntimeValue::String(
+                    [name.as_str(), description.as_str()].into_iter().join("\t"),
+                )
             })
             .collect::<VecDeque<_>>();
 
@@ -197,7 +236,13 @@ fn format_markdown(module_docs: &[ModuleDoc]) -> Result<String, miette::Error> {
             .map_err(|e| *e)?;
 
         result.push_str("\n\n## Selectors\n\n");
-        result.push_str(&selector_values.values().iter().map(|v| v.to_string()).join("\n"));
+        result.push_str(
+            &selector_values
+                .values()
+                .iter()
+                .map(|v| v.to_string())
+                .join("\n"),
+        );
     }
 
     Ok(result)
@@ -394,7 +439,11 @@ fn format_html(module_docs: &[ModuleDoc]) -> String {
 
     // Build function pages
     let mut pages = if has_multiple {
-        let all_symbols: VecDeque<_> = module_docs.iter().flat_map(|m| m.symbols.iter()).cloned().collect();
+        let all_symbols: VecDeque<_> = module_docs
+            .iter()
+            .flat_map(|m| m.symbols.iter())
+            .cloned()
+            .collect();
         let mut pages_html = build_module_page("mod-all", &all_symbols, true);
         for (i, m) in module_docs.iter().enumerate() {
             pages_html.push('\n');
@@ -412,7 +461,11 @@ fn format_html(module_docs: &[ModuleDoc]) -> String {
                 continue;
             }
             pages.push('\n');
-            pages.push_str(&build_selector_page(&format!("sel-{i}"), &m.selectors, false));
+            pages.push_str(&build_selector_page(
+                &format!("sel-{i}"),
+                &m.selectors,
+                false,
+            ));
         }
     }
 
