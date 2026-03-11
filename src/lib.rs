@@ -159,7 +159,7 @@ fn extract_selectors(hir: &mq_hir::Hir) -> VecDeque<[String; 2]> {
         .sorted_by_key(|(_, symbol)| symbol.value.clone())
         .filter_map(|(_, symbol)| match symbol {
             mq_hir::Symbol {
-                kind: mq_hir::SymbolKind::Selector,
+                kind: mq_hir::SymbolKind::Selector(_),
                 value: Some(value),
                 doc,
                 ..
