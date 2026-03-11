@@ -159,11 +159,11 @@ fn extract_selectors(hir: &mq_hir::Hir) -> VecDeque<[String; 2]> {
         .sorted_by_key(|(_, symbol)| symbol.value.clone())
         .filter_map(|(_, symbol)| match symbol {
             mq_hir::Symbol {
-                kind: mq_hir::SymbolKind::Selector(_),
+                kind: mq_hir::SymbolKind::Selector(s),
                 value: Some(value),
                 doc,
                 ..
-            } => {
+            } if !s.is_attribute_selector() => {
                 let name = format!("`{}`", value);
                 let description = doc.iter().map(|(_, d)| d.to_string()).join("\n");
                 Some([name, description])
