@@ -9,14 +9,14 @@ license = "MIT"
 name = "mq-docs"
 readme = "README.md"
 repository = "https://github.com/harehare/mq"
-version = "0.1.7"
+version = "0.1.8"
 
 [dependencies]
 clap = {version = "4.6.0", features = ["derive"]}
 itertools = "0.14.0"
 miette = {version = "7.6.0", features = ["fancy"]}
-mq-hir = "0.5.19"
-mq-lang = "0.5.19"
+mq-hir = "0.5.20"
+mq-lang = "0.5.20"
 url = "2.5.8"
 
 [[bin]]
