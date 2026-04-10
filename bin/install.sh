@@ -5,8 +5,7 @@ set -e
 # mq-docs installation script
 
 readonly MQD_REPO="harehare/mq-docs"
-readonly MQD_INSTALL_DIR="$HOME/.mq"
-readonly MQD_BIN_DIR="$MQD_INSTALL_DIR/bin"
+readonly MQD_BIN_DIR="$HOME/.local/bin"
 
 
 # Colors for output
