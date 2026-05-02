@@ -186,10 +186,17 @@ fn format_markdown(module_docs: &[ModuleDoc]) -> Result<String, miette::Error> {
         .cloned()
         .collect();
 
+    let sanitize = |s: &str| s.replace('\t', " ").replace('\n', " ").replace('\r', "");
+
     let mut doc_csv = all_symbols
         .iter()
         .map(|[name, description, args, example]| {
-            mq_lang::RuntimeValue::String([name, description, args, example].into_iter().join("\t"))
+            mq_lang::RuntimeValue::String(
+                [name, description, args, example]
+                    .into_iter()
+                    .map(|s| sanitize(s))
+                    .join("\t"),
+            )
         })
         .collect::<VecDeque<_>>();
 
@@ -216,7 +223,10 @@ fn format_markdown(module_docs: &[ModuleDoc]) -> Result<String, miette::Error> {
             .iter()
             .map(|[name, description]| {
                 mq_lang::RuntimeValue::String(
-                    [name.as_str(), description.as_str()].into_iter().join("\t"),
+                    [name.as_str(), description.as_str()]
+                        .into_iter()
+                        .map(|s| sanitize(s))
+                        .join("\t"),
                 )
             })
             .collect::<VecDeque<_>>();
