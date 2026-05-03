@@ -13,6 +13,7 @@ pub enum DocFormat {
 }
 
 /// A single documented function or macro entry with clean (no backticks) fields.
+#[derive(Clone)]
 pub struct DocEntry {
     pub name: String,
     pub description: String,
@@ -22,9 +23,17 @@ pub struct DocEntry {
 }
 
 /// A single documented selector entry with clean (no backticks) fields.
+#[derive(Clone)]
 pub struct SelectorEntry {
     pub name: String,
     pub description: String,
+}
+
+/// A group of documented entries belonging to a single module or file.
+pub struct ModuleEntry {
+    pub name: String,
+    pub functions: Vec<DocEntry>,
+    pub selectors: Vec<SelectorEntry>,
 }
 
 /// A group of documented symbols belonging to a single module or file.
@@ -96,6 +105,56 @@ pub fn extract_entries(
         .collect();
 
     Ok((functions, selectors))
+}
+
+/// Extract entries grouped by module, without flattening.
+pub fn extract_module_entries(
+    module_names: &Option<Vec<String>>,
+    files: &Option<Vec<(String, String)>>,
+    include_builtin: bool,
+) -> Result<Vec<ModuleEntry>, miette::Error> {
+    let module_docs = build_module_docs(module_names, files, include_builtin)?;
+
+    Ok(module_docs
+        .into_iter()
+        .map(|m| {
+            let functions = m
+                .symbols
+                .iter()
+                .map(|[name, description, args, example]| {
+                    let is_deprecated = name.starts_with("~~");
+                    let clean_name = name
+                        .trim_start_matches("~~`")
+                        .trim_end_matches("`~~")
+                        .trim_start_matches('`')
+                        .trim_end_matches('`')
+                        .to_string();
+                    DocEntry {
+                        name: clean_name,
+                        description: description.clone(),
+                        params: args.replace('`', ""),
+                        example: example.clone(),
+                        is_deprecated,
+                    }
+                })
+                .collect();
+
+            let selectors = m
+                .selectors
+                .iter()
+                .map(|[name, description]| SelectorEntry {
+                    name: name.trim_start_matches('`').trim_end_matches('`').to_string(),
+                    description: description.clone(),
+                })
+                .collect();
+
+            ModuleEntry {
+                name: m.name,
+                functions,
+                selectors,
+            }
+        })
+        .collect())
 }
 
 /// Generate documentation for mq functions, macros, and selectors.

@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use clap::Parser;
 use miette::{IntoDiagnostic, miette};
-use mq_docs::{DocFormat, extract_entries, generate_docs};
+use mq_docs::{DocFormat, extract_module_entries, generate_docs};
 
 /// Show functions documentation for the query
 #[derive(Parser, Debug)]
@@ -48,10 +48,9 @@ fn main() -> miette::Result<()> {
     };
 
     if cli.tui {
-        // In TUI mode, load all data. --search seeds the initial search query.
-        let (functions, selectors) =
-            extract_entries(&cli.module_names, &files, cli.include_builtin, None)?;
-        tui::run_tui(functions, selectors, cli.search)?;
+        let modules =
+            extract_module_entries(&cli.module_names, &files, cli.include_builtin)?;
+        tui::run_tui(modules, cli.search)?;
     } else {
         let output = generate_docs(
             &cli.module_names,

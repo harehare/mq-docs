@@ -8,185 +8,230 @@ use crossterm::{
 use ratatui::{
     Frame, Terminal,
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout},
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Tabs},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Tabs, Wrap},
 };
 
-use mq_docs::{DocEntry, SelectorEntry};
+use mq_docs::{DocEntry, ModuleEntry, SelectorEntry};
 
-/// Which top-level tab is active.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Tab {
+enum ContentTab {
     Functions,
     Selectors,
 }
 
-/// Whether the user is currently typing a search query.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FocusedPane {
+    Modules,
+    Items,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum InputMode {
     Normal,
     Searching,
 }
 
-/// Full TUI application state.
 struct App {
-    tab: Tab,
+    // module_names[0] = "All" (virtual), [1..] = real modules
+    module_names: Vec<String>,
+    // parallel vecs of functions/selectors per module (index 0 = All combined)
+    module_functions: Vec<Vec<DocEntry>>,
+    module_selectors: Vec<Vec<SelectorEntry>>,
+
+    selected_module: usize,
+    module_list_state: ListState,
+
+    content_tab: ContentTab,
+
+    // filtered indices into module_functions[selected_module] / module_selectors[selected_module]
+    filtered_fn: Vec<usize>,
+    filtered_sel: Vec<usize>,
+    item_list_state: ListState,
+
+    focused: FocusedPane,
     input_mode: InputMode,
     search_query: String,
 
-    // full data
-    all_functions: Vec<DocEntry>,
-    all_selectors: Vec<SelectorEntry>,
-
-    // filtered views (indices into all_*)
-    filtered_fn_indices: Vec<usize>,
-    filtered_sel_indices: Vec<usize>,
-
-    fn_list_state: ListState,
-    sel_list_state: ListState,
+    multi_module: bool,
 }
 
 impl App {
-    fn new(
-        functions: Vec<DocEntry>,
-        selectors: Vec<SelectorEntry>,
-        initial_search: Option<String>,
-    ) -> Self {
-        let fn_count = functions.len();
-        let sel_count = selectors.len();
+    fn new(modules: Vec<ModuleEntry>, initial_search: Option<String>) -> Self {
+        let multi_module = modules.len() > 1;
+
+        // "All" virtual module = concat of all real modules
+        let all_fns: Vec<DocEntry> = modules
+            .iter()
+            .flat_map(|m| m.functions.iter().cloned())
+            .collect();
+        let all_sels: Vec<SelectorEntry> = modules
+            .iter()
+            .flat_map(|m| m.selectors.iter().cloned())
+            .collect();
+
+        let mut module_names = vec!["All".to_string()];
+        let mut module_functions = vec![all_fns];
+        let mut module_selectors = vec![all_sels];
+
+        for m in modules {
+            module_names.push(m.name);
+            module_functions.push(m.functions);
+            module_selectors.push(m.selectors);
+        }
+
+        let fn_count = module_functions[0].len();
+        let sel_count = module_selectors[0].len();
+
+        let mut module_state = ListState::default();
+        module_state.select(Some(0));
+        let mut item_state = ListState::default();
+        if fn_count > 0 {
+            item_state.select(Some(0));
+        }
 
         let mut app = App {
-            tab: Tab::Functions,
+            module_names,
+            module_functions,
+            module_selectors,
+            selected_module: 0,
+            module_list_state: module_state,
+            content_tab: ContentTab::Functions,
+            filtered_fn: (0..fn_count).collect(),
+            filtered_sel: (0..sel_count).collect(),
+            item_list_state: item_state,
+            focused: if multi_module {
+                FocusedPane::Modules
+            } else {
+                FocusedPane::Items
+            },
             input_mode: InputMode::Normal,
             search_query: initial_search.unwrap_or_default(),
-            all_functions: functions,
-            all_selectors: selectors,
-            filtered_fn_indices: (0..fn_count).collect(),
-            filtered_sel_indices: (0..sel_count).collect(),
-            fn_list_state: ListState::default(),
-            sel_list_state: ListState::default(),
+            multi_module,
         };
 
-        // Apply initial search if provided
         if !app.search_query.is_empty() {
             app.apply_filter();
-        }
-
-        // Select first item in each list
-        if !app.filtered_fn_indices.is_empty() {
-            app.fn_list_state.select(Some(0));
-        }
-        if !app.filtered_sel_indices.is_empty() {
-            app.sel_list_state.select(Some(0));
         }
 
         app
     }
 
+    fn current_fns(&self) -> &Vec<DocEntry> {
+        &self.module_functions[self.selected_module]
+    }
+
+    fn current_sels(&self) -> &Vec<SelectorEntry> {
+        &self.module_selectors[self.selected_module]
+    }
+
     fn apply_filter(&mut self) {
         let q = self.search_query.to_lowercase();
 
-        self.filtered_fn_indices = self
-            .all_functions
+        self.filtered_fn = self
+            .current_fns()
             .iter()
             .enumerate()
             .filter(|(_, e)| {
-                e.name.to_lowercase().contains(&q)
+                q.is_empty()
+                    || e.name.to_lowercase().contains(&q)
                     || e.description.to_lowercase().contains(&q)
             })
             .map(|(i, _)| i)
             .collect();
 
-        self.filtered_sel_indices = self
-            .all_selectors
+        self.filtered_sel = self
+            .current_sels()
             .iter()
             .enumerate()
             .filter(|(_, e)| {
-                e.name.to_lowercase().contains(&q)
+                q.is_empty()
+                    || e.name.to_lowercase().contains(&q)
                     || e.description.to_lowercase().contains(&q)
             })
             .map(|(i, _)| i)
             .collect();
 
-        // Reset selection to first visible item
-        self.fn_list_state
-            .select(if self.filtered_fn_indices.is_empty() {
-                None
-            } else {
-                Some(0)
-            });
-        self.sel_list_state
-            .select(if self.filtered_sel_indices.is_empty() {
-                None
-            } else {
-                Some(0)
-            });
+        let empty = match self.content_tab {
+            ContentTab::Functions => self.filtered_fn.is_empty(),
+            ContentTab::Selectors => self.filtered_sel.is_empty(),
+        };
+        self.item_list_state
+            .select(if empty { None } else { Some(0) });
+    }
+
+    fn select_module(&mut self, idx: usize) {
+        if idx >= self.module_names.len() {
+            return;
+        }
+        self.selected_module = idx;
+        self.module_list_state.select(Some(idx));
+        self.apply_filter();
+    }
+
+    fn navigate_module(&mut self, delta: isize) {
+        let count = self.module_names.len();
+        if count == 0 {
+            return;
+        }
+        let cur = self.module_list_state.selected().unwrap_or(0) as isize;
+        let next = (cur + delta).rem_euclid(count as isize) as usize;
+        self.select_module(next);
+    }
+
+    fn navigate_item(&mut self, delta: isize) {
+        let count = match self.content_tab {
+            ContentTab::Functions => self.filtered_fn.len(),
+            ContentTab::Selectors => self.filtered_sel.len(),
+        };
+        if count == 0 {
+            return;
+        }
+        let cur = self.item_list_state.selected().unwrap_or(0) as isize;
+        let next = (cur + delta).rem_euclid(count as isize) as usize;
+        self.item_list_state.select(Some(next));
+    }
+
+    fn switch_content_tab(&mut self) {
+        self.content_tab = match self.content_tab {
+            ContentTab::Functions => ContentTab::Selectors,
+            ContentTab::Selectors => ContentTab::Functions,
+        };
+        let empty = match self.content_tab {
+            ContentTab::Functions => self.filtered_fn.is_empty(),
+            ContentTab::Selectors => self.filtered_sel.is_empty(),
+        };
+        self.item_list_state
+            .select(if empty { None } else { Some(0) });
     }
 
     fn current_fn_entry(&self) -> Option<&DocEntry> {
-        let idx = self.fn_list_state.selected()?;
-        let real = self.filtered_fn_indices.get(idx)?;
-        self.all_functions.get(*real)
+        let idx = self.item_list_state.selected()?;
+        let real = self.filtered_fn.get(idx)?;
+        self.current_fns().get(*real)
     }
 
     fn current_sel_entry(&self) -> Option<&SelectorEntry> {
-        let idx = self.sel_list_state.selected()?;
-        let real = self.filtered_sel_indices.get(idx)?;
-        self.all_selectors.get(*real)
+        let idx = self.item_list_state.selected()?;
+        let real = self.filtered_sel.get(idx)?;
+        self.current_sels().get(*real)
     }
 
     fn fn_count(&self) -> usize {
-        self.filtered_fn_indices.len()
+        self.filtered_fn.len()
     }
 
     fn sel_count(&self) -> usize {
-        self.filtered_sel_indices.len()
-    }
-
-    fn navigate(&mut self, delta: isize) {
-        match self.tab {
-            Tab::Functions => {
-                let count = self.fn_count();
-                if count == 0 {
-                    return;
-                }
-                let cur = self.fn_list_state.selected().unwrap_or(0) as isize;
-                let next = (cur + delta).rem_euclid(count as isize) as usize;
-                self.fn_list_state.select(Some(next));
-            }
-            Tab::Selectors => {
-                let count = self.sel_count();
-                if count == 0 {
-                    return;
-                }
-                let cur = self.sel_list_state.selected().unwrap_or(0) as isize;
-                let next = (cur + delta).rem_euclid(count as isize) as usize;
-                self.sel_list_state.select(Some(next));
-            }
-        }
-    }
-
-    fn page_jump(&mut self, delta: isize) {
-        self.navigate(delta * 10);
-    }
-
-    fn switch_tab(&mut self) {
-        self.tab = match self.tab {
-            Tab::Functions => Tab::Selectors,
-            Tab::Selectors => Tab::Functions,
-        };
+        self.filtered_sel.len()
     }
 }
 
-/// Run the interactive TUI. Returns when the user quits.
 pub fn run_tui(
-    functions: Vec<DocEntry>,
-    selectors: Vec<SelectorEntry>,
+    modules: Vec<ModuleEntry>,
     initial_search: Option<String>,
 ) -> miette::Result<()> {
-    // Set up terminal
     enable_raw_mode().map_err(|e| miette::miette!("Failed to enable raw mode: {e}"))?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)
@@ -196,10 +241,9 @@ pub fn run_tui(
     let mut terminal =
         Terminal::new(backend).map_err(|e| miette::miette!("Failed to create terminal: {e}"))?;
 
-    let mut app = App::new(functions, selectors, initial_search);
+    let mut app = App::new(modules, initial_search);
     let result = run_event_loop(&mut terminal, &mut app);
 
-    // Always restore terminal
     let _ = disable_raw_mode();
     let _ = execute!(
         terminal.backend_mut(),
@@ -248,11 +292,33 @@ fn run_event_loop(
                     KeyCode::Char('/') => {
                         app.input_mode = InputMode::Searching;
                     }
-                    KeyCode::Tab => app.switch_tab(),
-                    KeyCode::Up | KeyCode::Char('k') => app.navigate(-1),
-                    KeyCode::Down | KeyCode::Char('j') => app.navigate(1),
-                    KeyCode::PageUp => app.page_jump(-1),
-                    KeyCode::PageDown => app.page_jump(1),
+                    KeyCode::Tab => app.switch_content_tab(),
+                    // Focus switching between module pane and item pane
+                    KeyCode::Char('h') | KeyCode::Left if app.multi_module => {
+                        app.focused = FocusedPane::Modules;
+                    }
+                    KeyCode::Char('l') | KeyCode::Right if app.multi_module => {
+                        app.focused = FocusedPane::Items;
+                    }
+                    KeyCode::Enter if app.focused == FocusedPane::Modules => {
+                        app.focused = FocusedPane::Items;
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => match app.focused {
+                        FocusedPane::Modules => app.navigate_module(-1),
+                        FocusedPane::Items => app.navigate_item(-1),
+                    },
+                    KeyCode::Down | KeyCode::Char('j') => match app.focused {
+                        FocusedPane::Modules => app.navigate_module(1),
+                        FocusedPane::Items => app.navigate_item(1),
+                    },
+                    KeyCode::PageUp => match app.focused {
+                        FocusedPane::Modules => app.navigate_module(-10),
+                        FocusedPane::Items => app.navigate_item(-10),
+                    },
+                    KeyCode::PageDown => match app.focused {
+                        FocusedPane::Modules => app.navigate_module(10),
+                        FocusedPane::Items => app.navigate_item(10),
+                    },
                     _ => {}
                 },
             }
@@ -260,30 +326,39 @@ fn run_event_loop(
     }
 }
 
+fn focused_block<'a>(title: &'a str, focused: bool) -> Block<'a> {
+    let border_style = if focused {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .border_style(border_style)
+}
+
 fn draw(f: &mut Frame, app: &App) {
     let area = f.area();
 
-    // Outer vertical layout: tabs / body / help bar
     let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // tab bar
-            Constraint::Min(0),    // main area
-            Constraint::Length(1), // help bar
+            Constraint::Length(3),
+            Constraint::Min(0),
+            Constraint::Length(1),
         ])
         .split(area);
 
-    // --- Tab bar ---
+    // Tab bar
     let fn_label = format!(" Functions ({}) ", app.fn_count());
     let sel_label = format!(" Selectors ({}) ", app.sel_count());
-    let tab_titles: Vec<Line> = vec![Line::from(fn_label), Line::from(sel_label)];
-    let selected_tab = match app.tab {
-        Tab::Functions => 0,
-        Tab::Selectors => 1,
-    };
-    let tabs = Tabs::new(tab_titles)
+    let tabs = Tabs::new(vec![Line::from(fn_label), Line::from(sel_label)])
         .block(Block::default().borders(Borders::ALL).title(" mq docs "))
-        .select(selected_tab)
+        .select(match app.content_tab {
+            ContentTab::Functions => 0,
+            ContentTab::Selectors => 1,
+        })
         .highlight_style(
             Style::default()
                 .fg(Color::Cyan)
@@ -291,34 +366,38 @@ fn draw(f: &mut Frame, app: &App) {
         );
     f.render_widget(tabs, outer[0]);
 
-    // --- Main area: list | detail ---
-    let body = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
-        .split(outer[1]);
-
-    match app.tab {
-        Tab::Functions => {
-            draw_fn_list(f, app, body[0]);
-            draw_fn_detail(f, app, body[1]);
-        }
-        Tab::Selectors => {
-            draw_sel_list(f, app, body[0]);
-            draw_sel_detail(f, app, body[1]);
-        }
+    // Main area
+    if app.multi_module {
+        let body = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Percentage(20),
+                Constraint::Percentage(30),
+                Constraint::Percentage(50),
+            ])
+            .split(outer[1]);
+        draw_module_list(f, app, body[0]);
+        draw_item_list(f, app, body[1]);
+        draw_detail(f, app, body[2]);
+    } else {
+        let body = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
+            .split(outer[1]);
+        draw_item_list(f, app, body[0]);
+        draw_detail(f, app, body[1]);
     }
 
-    // --- Help / search bar ---
+    // Help bar
     let help_text = if app.input_mode == InputMode::Searching {
         Line::from(vec![
             Span::styled(
                 " Search: ",
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(
-                app.search_query.as_str(),
-                Style::default().fg(Color::White),
-            ),
+            Span::styled(app.search_query.as_str(), Style::default().fg(Color::White)),
             Span::styled("_", Style::default().fg(Color::Cyan)),
             Span::styled(
                 "  Esc: cancel  Enter: confirm",
@@ -326,38 +405,31 @@ fn draw(f: &mut Frame, app: &App) {
             ),
         ])
     } else {
-        Line::from(vec![Span::styled(
-            " /: search  Tab: switch  ↑/↓ j/k: navigate  PgUp/PgDn: page  q: quit",
-            Style::default().fg(Color::DarkGray),
-        )])
+        let hints = if app.multi_module {
+            " /: search  Tab: switch  h/l ←/→: pane  j/k ↑/↓: navigate  Enter: select  q: quit"
+        } else {
+            " /: search  Tab: switch  j/k ↑/↓: navigate  PgUp/PgDn: page  q: quit"
+        };
+        Line::from(Span::styled(hints, Style::default().fg(Color::DarkGray)))
     };
-
-    let help = Paragraph::new(help_text)
-        .style(Style::default().bg(Color::Reset));
-    f.render_widget(help, outer[2]);
+    f.render_widget(Paragraph::new(help_text), outer[2]);
 }
 
-fn draw_fn_list(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+fn draw_module_list(f: &mut Frame, app: &App, area: Rect) {
+    let focused = app.focused == FocusedPane::Modules;
     let items: Vec<ListItem> = app
-        .filtered_fn_indices
+        .module_names
         .iter()
-        .map(|&i| {
-            let entry = &app.all_functions[i];
-            if entry.is_deprecated {
-                ListItem::new(Line::from(vec![Span::styled(
-                    entry.name.as_str(),
-                    Style::default()
-                        .fg(Color::DarkGray)
-                        .add_modifier(Modifier::DIM),
-                )]))
-            } else {
-                ListItem::new(entry.name.as_str())
-            }
+        .enumerate()
+        .map(|(i, name)| {
+            let fn_count = app.module_functions[i].len();
+            let label = format!("{name} ({fn_count})");
+            ListItem::new(label)
         })
         .collect();
 
     let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title(" Functions "))
+        .block(focused_block(" Modules ", focused))
         .highlight_style(
             Style::default()
                 .fg(Color::Black)
@@ -365,166 +437,175 @@ fn draw_fn_list(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                 .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol("▶ ");
-
-    f.render_stateful_widget(list, area, &mut app.fn_list_state.clone());
+    f.render_stateful_widget(list, area, &mut app.module_list_state.clone());
 }
 
-fn draw_fn_detail(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
-    let block = Block::default().borders(Borders::ALL).title(" Detail ");
+fn draw_item_list(f: &mut Frame, app: &App, area: Rect) {
+    let focused = !app.multi_module || app.focused == FocusedPane::Items;
 
-    if let Some(entry) = app.current_fn_entry() {
-        let mut lines: Vec<Line> = Vec::new();
+    match app.content_tab {
+        ContentTab::Functions => {
+            let items: Vec<ListItem> = app
+                .filtered_fn
+                .iter()
+                .map(|&i| {
+                    let e = &app.current_fns()[i];
+                    if e.is_deprecated {
+                        ListItem::new(Line::from(Span::styled(
+                            e.name.as_str(),
+                            Style::default()
+                                .fg(Color::DarkGray)
+                                .add_modifier(Modifier::DIM),
+                        )))
+                    } else {
+                        ListItem::new(e.name.as_str())
+                    }
+                })
+                .collect();
 
-        // Function name (yellow + bold)
-        lines.push(Line::from(vec![
-            Span::styled(
-                "Function:    ",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                entry.name.as_str(),
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]));
-
-        // Deprecated warning
-        if entry.is_deprecated {
-            lines.push(Line::from(vec![Span::styled(
-                "             ⚠ Deprecated",
-                Style::default()
-                    .fg(Color::DarkGray)
-                    .add_modifier(Modifier::DIM),
-            )]));
+            let list = List::new(items)
+                .block(focused_block(" Functions ", focused))
+                .highlight_style(
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                )
+                .highlight_symbol("▶ ");
+            f.render_stateful_widget(list, area, &mut app.item_list_state.clone());
         }
+        ContentTab::Selectors => {
+            let items: Vec<ListItem> = app
+                .filtered_sel
+                .iter()
+                .map(|&i| ListItem::new(app.current_sels()[i].name.as_str()))
+                .collect();
 
-        lines.push(Line::from(""));
-
-        // Description
-        lines.push(Line::from(vec![Span::styled(
-            "Description",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )]));
-        for desc_line in entry.description.lines() {
-            lines.push(Line::from(format!("  {desc_line}")));
+            let list = List::new(items)
+                .block(focused_block(" Selectors ", focused))
+                .highlight_style(
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                )
+                .highlight_symbol("▶ ");
+            f.render_stateful_widget(list, area, &mut app.item_list_state.clone());
         }
-        if entry.description.is_empty() {
-            lines.push(Line::from("  —"));
-        }
-
-        lines.push(Line::from(""));
-
-        // Parameters
-        lines.push(Line::from(vec![
-            Span::styled(
-                "Parameters:  ",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(if entry.params.is_empty() {
-                "—"
-            } else {
-                entry.params.as_str()
-            }),
-        ]));
-
-        lines.push(Line::from(""));
-
-        // Example
-        lines.push(Line::from(vec![
-            Span::styled(
-                "Example:     ",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                entry.example.as_str(),
-                Style::default().fg(Color::Green),
-            ),
-        ]));
-
-        let para = Paragraph::new(lines)
-            .block(block)
-            .wrap(ratatui::widgets::Wrap { trim: false });
-        f.render_widget(para, area);
-    } else {
-        let para = Paragraph::new("No entry selected.").block(block);
-        f.render_widget(para, area);
     }
 }
 
-fn draw_sel_list(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
-    let items: Vec<ListItem> = app
-        .filtered_sel_indices
-        .iter()
-        .map(|&i| {
-            let entry = &app.all_selectors[i];
-            ListItem::new(entry.name.as_str())
-        })
-        .collect();
+fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Detail ")
+        .border_style(Style::default().fg(Color::DarkGray));
 
-    let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title(" Selectors "))
-        .highlight_style(
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )
-        .highlight_symbol("▶ ");
-
-    f.render_stateful_widget(list, area, &mut app.sel_list_state.clone());
-}
-
-fn draw_sel_detail(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
-    let block = Block::default().borders(Borders::ALL).title(" Detail ");
-
-    if let Some(entry) = app.current_sel_entry() {
-        let lines: Vec<Line> = vec![
-            Line::from(vec![
-                Span::styled(
-                    "Selector:    ",
+    match app.content_tab {
+        ContentTab::Functions => {
+            if let Some(e) = app.current_fn_entry() {
+                let mut lines: Vec<Line> = vec![
+                    Line::from(vec![
+                        Span::styled(
+                            "Function:    ",
+                            Style::default()
+                                .fg(Color::Cyan)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            e.name.as_str(),
+                            Style::default()
+                                .fg(Color::Yellow)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                    ]),
+                ];
+                if e.is_deprecated {
+                    lines.push(Line::from(Span::styled(
+                        "             ⚠ Deprecated",
+                        Style::default()
+                            .fg(Color::DarkGray)
+                            .add_modifier(Modifier::DIM),
+                    )));
+                }
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    "Description",
                     Style::default()
                         .fg(Color::Cyan)
                         .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    entry.name.as_str(),
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                ),
-            ]),
-            Line::from(""),
-            Line::from(vec![Span::styled(
-                "Description",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            )]),
-            Line::from(format!(
-                "  {}",
-                if entry.description.is_empty() {
-                    "—"
+                )));
+                if e.description.is_empty() {
+                    lines.push(Line::from("  —"));
                 } else {
-                    entry.description.as_str()
+                    for l in e.description.lines() {
+                        lines.push(Line::from(format!("  {l}")));
+                    }
                 }
-            )),
-        ];
-
-        let para = Paragraph::new(lines)
-            .block(block)
-            .wrap(ratatui::widgets::Wrap { trim: false });
-        f.render_widget(para, area);
-    } else {
-        let para = Paragraph::new("No entry selected.").block(block);
-        f.render_widget(para, area);
+                lines.push(Line::from(""));
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        "Parameters:  ",
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw(if e.params.is_empty() { "—" } else { &e.params }),
+                ]));
+                lines.push(Line::from(""));
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        "Example:     ",
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(e.example.as_str(), Style::default().fg(Color::Green)),
+                ]));
+                f.render_widget(
+                    Paragraph::new(lines).block(block).wrap(Wrap { trim: false }),
+                    area,
+                );
+            } else {
+                f.render_widget(Paragraph::new("No entry selected.").block(block), area);
+            }
+        }
+        ContentTab::Selectors => {
+            if let Some(e) = app.current_sel_entry() {
+                let lines: Vec<Line> = vec![
+                    Line::from(vec![
+                        Span::styled(
+                            "Selector:    ",
+                            Style::default()
+                                .fg(Color::Cyan)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            e.name.as_str(),
+                            Style::default()
+                                .fg(Color::Yellow)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                    ]),
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        "Description",
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    )),
+                    Line::from(format!(
+                        "  {}",
+                        if e.description.is_empty() { "—" } else { &e.description }
+                    )),
+                ];
+                f.render_widget(
+                    Paragraph::new(lines).block(block).wrap(Wrap { trim: false }),
+                    area,
+                );
+            } else {
+                f.render_widget(Paragraph::new("No entry selected.").block(block), area);
+            }
+        }
     }
 }
