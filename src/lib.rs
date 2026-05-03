@@ -12,6 +12,30 @@ pub enum DocFormat {
     Html,
 }
 
+/// A single documented function or macro entry with clean (no backticks) fields.
+#[derive(Clone)]
+pub struct DocEntry {
+    pub name: String,
+    pub description: String,
+    pub params: String,
+    pub example: String,
+    pub is_deprecated: bool,
+}
+
+/// A single documented selector entry with clean (no backticks) fields.
+#[derive(Clone)]
+pub struct SelectorEntry {
+    pub name: String,
+    pub description: String,
+}
+
+/// A group of documented entries belonging to a single module or file.
+pub struct ModuleEntry {
+    pub name: String,
+    pub functions: Vec<DocEntry>,
+    pub selectors: Vec<SelectorEntry>,
+}
+
 /// A group of documented symbols belonging to a single module or file.
 struct ModuleDoc {
     name: String,
@@ -19,17 +43,173 @@ struct ModuleDoc {
     selectors: VecDeque<[String; 2]>,
 }
 
+/// Extract clean `DocEntry` and `SelectorEntry` values, optionally filtered by a search term.
+pub fn extract_entries(
+    module_names: &Option<Vec<String>>,
+    files: &Option<Vec<(String, String)>>,
+    include_builtin: bool,
+    filter: Option<&str>,
+) -> Result<(Vec<DocEntry>, Vec<SelectorEntry>), miette::Error> {
+    let module_docs = build_module_docs(module_names, files, include_builtin)?;
+
+    let filter_lower = filter.map(|f| f.to_lowercase());
+
+    let functions: Vec<DocEntry> = module_docs
+        .iter()
+        .flat_map(|m| m.symbols.iter())
+        .filter_map(|[name, description, args, example]| {
+            let is_deprecated = name.starts_with("~~");
+            let clean_name = name
+                .trim_start_matches("~~`")
+                .trim_end_matches("`~~")
+                .trim_start_matches('`')
+                .trim_end_matches('`')
+                .to_string();
+            let clean_args = args.replace('`', "");
+
+            if let Some(ref q) = filter_lower {
+                let haystack = format!("{} {}", clean_name.to_lowercase(), description.to_lowercase());
+                if !haystack.contains(q.as_str()) {
+                    return None;
+                }
+            }
+
+            Some(DocEntry {
+                name: clean_name,
+                description: description.clone(),
+                params: clean_args,
+                example: example.clone(),
+                is_deprecated,
+            })
+        })
+        .collect();
+
+    let selectors: Vec<SelectorEntry> = module_docs
+        .iter()
+        .flat_map(|m| m.selectors.iter())
+        .filter_map(|[name, description]| {
+            let clean_name = name.trim_start_matches('`').trim_end_matches('`').to_string();
+
+            if let Some(ref q) = filter_lower {
+                let haystack = format!("{} {}", clean_name.to_lowercase(), description.to_lowercase());
+                if !haystack.contains(q.as_str()) {
+                    return None;
+                }
+            }
+
+            Some(SelectorEntry {
+                name: clean_name,
+                description: description.clone(),
+            })
+        })
+        .collect();
+
+    Ok((functions, selectors))
+}
+
+/// Extract entries grouped by module, without flattening.
+pub fn extract_module_entries(
+    module_names: &Option<Vec<String>>,
+    files: &Option<Vec<(String, String)>>,
+    include_builtin: bool,
+) -> Result<Vec<ModuleEntry>, miette::Error> {
+    let module_docs = build_module_docs(module_names, files, include_builtin)?;
+
+    Ok(module_docs
+        .into_iter()
+        .map(|m| {
+            let functions = m
+                .symbols
+                .iter()
+                .map(|[name, description, args, example]| {
+                    let is_deprecated = name.starts_with("~~");
+                    let clean_name = name
+                        .trim_start_matches("~~`")
+                        .trim_end_matches("`~~")
+                        .trim_start_matches('`')
+                        .trim_end_matches('`')
+                        .to_string();
+                    DocEntry {
+                        name: clean_name,
+                        description: description.clone(),
+                        params: args.replace('`', ""),
+                        example: example.clone(),
+                        is_deprecated,
+                    }
+                })
+                .collect();
+
+            let selectors = m
+                .selectors
+                .iter()
+                .map(|[name, description]| SelectorEntry {
+                    name: name.trim_start_matches('`').trim_end_matches('`').to_string(),
+                    description: description.clone(),
+                })
+                .collect();
+
+            ModuleEntry {
+                name: m.name,
+                functions,
+                selectors,
+            }
+        })
+        .collect())
+}
+
 /// Generate documentation for mq functions, macros, and selectors.
 ///
 /// If `module_names` or `files` is provided, only the specified modules/files are loaded.
 /// Both can be combined. If `include_builtin` is true, built-in functions are also included.
 /// Otherwise, all builtin functions are documented.
+/// An optional `filter` performs case-insensitive substring matching on name and description.
 pub fn generate_docs(
     module_names: &Option<Vec<String>>,
     files: &Option<Vec<(String, String)>>,
     format: &DocFormat,
     include_builtin: bool,
+    filter: Option<&str>,
 ) -> Result<String, miette::Error> {
+    let mut module_docs = build_module_docs(module_names, files, include_builtin)?;
+
+    // Apply filter if provided
+    if let Some(q) = filter {
+        let q_lower = q.to_lowercase();
+        for m in &mut module_docs {
+            m.symbols.retain(|[name, description, _, _]| {
+                let clean_name = name
+                    .trim_start_matches("~~`")
+                    .trim_end_matches("`~~")
+                    .trim_start_matches('`')
+                    .trim_end_matches('`')
+                    .to_lowercase();
+                let desc_lower = description.to_lowercase();
+                clean_name.contains(&q_lower) || desc_lower.contains(&q_lower)
+            });
+            m.selectors.retain(|[name, description]| {
+                let clean_name = name
+                    .trim_start_matches('`')
+                    .trim_end_matches('`')
+                    .to_lowercase();
+                let desc_lower = description.to_lowercase();
+                clean_name.contains(&q_lower) || desc_lower.contains(&q_lower)
+            });
+        }
+    }
+
+    match format {
+        DocFormat::Markdown => format_markdown(&module_docs),
+        DocFormat::Text => Ok(format_text(&module_docs)),
+        DocFormat::Html => Ok(format_html(&module_docs)),
+    }
+}
+
+/// Build the list of `ModuleDoc` from the given parameters.
+fn build_module_docs(
+    module_names: &Option<Vec<String>>,
+    files: &Option<Vec<(String, String)>>,
+    include_builtin: bool,
+) -> Result<Vec<ModuleDoc>, miette::Error> {
     let has_files = files.as_ref().is_some_and(|f| !f.is_empty());
     let has_modules = module_names.as_ref().is_some_and(|m| !m.is_empty());
 
@@ -97,11 +277,7 @@ pub fn generate_docs(
         }]
     };
 
-    match format {
-        DocFormat::Markdown => format_markdown(&module_docs),
-        DocFormat::Text => Ok(format_text(&module_docs)),
-        DocFormat::Html => Ok(format_html(&module_docs)),
-    }
+    Ok(module_docs)
 }
 
 /// Extract function and macro symbols from HIR.
@@ -258,32 +434,152 @@ fn format_markdown(module_docs: &[ModuleDoc]) -> Result<String, miette::Error> {
     Ok(result)
 }
 
-/// Format documentation as plain text.
+/// Format documentation as a column-aligned plain-text table.
 fn format_text(module_docs: &[ModuleDoc]) -> String {
-    let functions = module_docs
+    const MAX_DESC_LEN: usize = 50;
+
+    let truncate = |s: &str| -> String {
+        let s = s.replace('\n', " ");
+        if s.chars().count() > MAX_DESC_LEN {
+            let truncated: String = s.chars().take(MAX_DESC_LEN - 1).collect();
+            format!("{truncated}…")
+        } else {
+            s
+        }
+    };
+
+    let functions: Vec<(String, String, String, String)> = module_docs
         .iter()
         .flat_map(|m| m.symbols.iter())
-        .map(|[name, description, args, _]| {
-            let name = name.replace('`', "");
-            let args = args.replace('`', "");
-            format!("# {description}\ndef {name}({args})")
+        .map(|[name, description, args, example]| {
+            let clean_name = name
+                .trim_start_matches("~~`")
+                .trim_end_matches("`~~")
+                .trim_start_matches('`')
+                .trim_end_matches('`')
+                .to_string();
+            let clean_args = args.replace('`', "");
+            (
+                clean_name,
+                truncate(description),
+                clean_args,
+                example.clone(),
+            )
         })
-        .join("\n\n");
+        .collect();
 
-    let selectors = module_docs
+    let selectors: Vec<(String, String)> = module_docs
         .iter()
         .flat_map(|m| m.selectors.iter())
         .map(|[name, description]| {
-            let name = name.replace('`', "");
-            format!("# {description}\nselector {name}")
+            let clean_name = name.trim_start_matches('`').trim_end_matches('`').to_string();
+            (clean_name, truncate(description))
         })
-        .join("\n\n");
+        .collect();
 
-    if selectors.is_empty() {
-        functions
-    } else {
-        format!("{functions}\n\n{selectors}")
+    let mut result = String::new();
+
+    if !functions.is_empty() {
+        // Compute column widths
+        let w_name = functions
+            .iter()
+            .map(|(n, _, _, _)| n.len())
+            .max()
+            .unwrap_or(0)
+            .max("FUNCTION".len());
+        let w_desc = functions
+            .iter()
+            .map(|(_, d, _, _)| d.chars().count())
+            .max()
+            .unwrap_or(0)
+            .max("DESCRIPTION".len());
+        let w_params = functions
+            .iter()
+            .map(|(_, _, p, _)| p.len())
+            .max()
+            .unwrap_or(0)
+            .max("PARAMETERS".len());
+        let w_example = functions
+            .iter()
+            .map(|(_, _, _, e)| e.len())
+            .max()
+            .unwrap_or(0)
+            .max("EXAMPLE".len());
+
+        let total = w_name + w_desc + w_params + w_example + 9; // 3 gaps of 3 spaces
+
+        // Header
+        result.push_str(&format!(
+            "{:<w_name$}   {:<w_desc$}   {:<w_params$}   {:<w_example$}\n",
+            "FUNCTION",
+            "DESCRIPTION",
+            "PARAMETERS",
+            "EXAMPLE",
+            w_name = w_name,
+            w_desc = w_desc,
+            w_params = w_params,
+            w_example = w_example,
+        ));
+        result.push_str(&"─".repeat(total));
+        result.push('\n');
+
+        for (name, desc, params, example) in &functions {
+            result.push_str(&format!(
+                "{:<w_name$}   {:<w_desc$}   {:<w_params$}   {:<w_example$}\n",
+                name,
+                desc,
+                params,
+                example,
+                w_name = w_name,
+                w_desc = w_desc,
+                w_params = w_params,
+                w_example = w_example,
+            ));
+        }
     }
+
+    if !selectors.is_empty() {
+        if !result.is_empty() {
+            result.push('\n');
+        }
+
+        let w_name = selectors
+            .iter()
+            .map(|(n, _)| n.len())
+            .max()
+            .unwrap_or(0)
+            .max("SELECTOR".len());
+        let w_desc = selectors
+            .iter()
+            .map(|(_, d)| d.chars().count())
+            .max()
+            .unwrap_or(0)
+            .max("DESCRIPTION".len());
+
+        let total = w_name + w_desc + 3;
+
+        result.push_str(&format!(
+            "{:<w_name$}   {:<w_desc$}\n",
+            "SELECTOR",
+            "DESCRIPTION",
+            w_name = w_name,
+            w_desc = w_desc,
+        ));
+        result.push_str(&"─".repeat(total));
+        result.push('\n');
+
+        for (name, desc) in &selectors {
+            result.push_str(&format!(
+                "{:<w_name$}   {:<w_desc$}\n",
+                name,
+                desc,
+                w_name = w_name,
+                w_desc = w_desc,
+            ));
+        }
+    }
+
+    result
 }
 
 /// Build HTML table rows for a set of symbols.

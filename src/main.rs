@@ -1,9 +1,11 @@
+mod tui;
+
 use std::fs;
 use std::path::PathBuf;
 
 use clap::Parser;
 use miette::{IntoDiagnostic, miette};
-use mq_docs::{DocFormat, generate_docs};
+use mq_docs::{DocFormat, extract_module_entries, generate_docs};
 
 /// Show functions documentation for the query
 #[derive(Parser, Debug)]
@@ -20,6 +22,12 @@ struct Cli {
     /// Include built-in functions alongside specified modules/files
     #[arg(short = 'B', long)]
     include_builtin: bool,
+    /// Launch interactive TUI browser
+    #[arg(short = 'T', long)]
+    tui: bool,
+    /// Filter functions and selectors by name or description
+    #[arg(short = 's', long)]
+    search: Option<String>,
 }
 
 fn main() -> miette::Result<()> {
@@ -39,7 +47,20 @@ fn main() -> miette::Result<()> {
         None
     };
 
-    let output = generate_docs(&cli.module_names, &files, &cli.format, cli.include_builtin)?;
-    println!("{output}");
+    if cli.tui {
+        let modules =
+            extract_module_entries(&cli.module_names, &files, cli.include_builtin)?;
+        tui::run_tui(modules, cli.search)?;
+    } else {
+        let output = generate_docs(
+            &cli.module_names,
+            &files,
+            &cli.format,
+            cli.include_builtin,
+            cli.search.as_deref(),
+        )?;
+        println!("{output}");
+    }
+
     Ok(())
 }
