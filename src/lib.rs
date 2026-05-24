@@ -204,6 +204,11 @@ pub fn generate_docs(
     }
 }
 
+const STANDARD_MODULE_NAMES: &[&str] = &[
+    "ast", "cbor", "csv", "fuzzy", "hcl", "json", "section", "table", "test", "toml", "toon",
+    "xml", "yaml",
+];
+
 /// Build the list of `ModuleDoc` from the given parameters.
 fn build_module_docs(
     module_names: &Option<Vec<String>>,
@@ -216,7 +221,7 @@ fn build_module_docs(
     let module_docs = if has_files || has_modules {
         let mut docs = Vec::new();
 
-        if include_builtin {
+        if include_builtin || has_modules {
             let mut hir = mq_hir::Hir::default();
             hir.add_code(None, "");
             docs.push(ModuleDoc {
@@ -224,6 +229,42 @@ fn build_module_docs(
                 symbols: extract_symbols(&hir, None),
                 selectors: extract_selectors(&hir),
             });
+        }
+
+        if has_modules {
+            let specified: Vec<&str> = module_names
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .map(|s| s.as_str())
+                .collect();
+
+            for &std_name in STANDARD_MODULE_NAMES {
+                if specified.contains(&std_name) {
+                    continue;
+                }
+                let mut hir = mq_hir::Hir::default();
+                hir.builtin.disabled = true;
+                hir.add_code(None, &format!("include \"{std_name}\""));
+
+                let source_id = hir.symbols().find_map(|(_, symbol)| {
+                    if let mq_hir::Symbol {
+                        kind: mq_hir::SymbolKind::Include(module_source_id),
+                        ..
+                    } = &symbol
+                    {
+                        Some(module_source_id)
+                    } else {
+                        None
+                    }
+                });
+
+                docs.push(ModuleDoc {
+                    name: std_name.to_string(),
+                    symbols: extract_symbols(&hir, source_id),
+                    selectors: extract_selectors(&hir),
+                });
+            }
         }
 
         if let Some(file_contents) = files {
@@ -268,13 +309,41 @@ fn build_module_docs(
 
         docs
     } else {
+        let mut docs = Vec::new();
+
         let mut hir = mq_hir::Hir::default();
         hir.add_code(None, "");
-        vec![ModuleDoc {
-            name: "Built-in functions and macros".to_string(),
+        docs.push(ModuleDoc {
+            name: "Built-in".to_string(),
             symbols: extract_symbols(&hir, None),
             selectors: extract_selectors(&hir),
-        }]
+        });
+
+        for &std_name in STANDARD_MODULE_NAMES {
+            let mut hir = mq_hir::Hir::default();
+            hir.builtin.disabled = true;
+            hir.add_code(None, &format!("include \"{std_name}\""));
+
+            let source_id = hir.symbols().find_map(|(_, symbol)| {
+                if let mq_hir::Symbol {
+                    kind: mq_hir::SymbolKind::Include(module_source_id),
+                    ..
+                } = &symbol
+                {
+                    Some(module_source_id)
+                } else {
+                    None
+                }
+            });
+
+            docs.push(ModuleDoc {
+                name: std_name.to_string(),
+                symbols: extract_symbols(&hir, source_id),
+                selectors: extract_selectors(&hir),
+            });
+        }
+
+        docs
     };
 
     Ok(module_docs)
