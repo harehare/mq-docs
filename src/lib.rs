@@ -68,7 +68,11 @@ pub fn extract_entries(
             let clean_args = args.replace('`', "");
 
             if let Some(ref q) = filter_lower {
-                let haystack = format!("{} {}", clean_name.to_lowercase(), description.to_lowercase());
+                let haystack = format!(
+                    "{} {}",
+                    clean_name.to_lowercase(),
+                    description.to_lowercase()
+                );
                 if !haystack.contains(q.as_str()) {
                     return None;
                 }
@@ -88,10 +92,17 @@ pub fn extract_entries(
         .iter()
         .flat_map(|m| m.selectors.iter())
         .filter_map(|[name, description]| {
-            let clean_name = name.trim_start_matches('`').trim_end_matches('`').to_string();
+            let clean_name = name
+                .trim_start_matches('`')
+                .trim_end_matches('`')
+                .to_string();
 
             if let Some(ref q) = filter_lower {
-                let haystack = format!("{} {}", clean_name.to_lowercase(), description.to_lowercase());
+                let haystack = format!(
+                    "{} {}",
+                    clean_name.to_lowercase(),
+                    description.to_lowercase()
+                );
                 if !haystack.contains(q.as_str()) {
                     return None;
                 }
@@ -143,7 +154,10 @@ pub fn extract_module_entries(
                 .selectors
                 .iter()
                 .map(|[name, description]| SelectorEntry {
-                    name: name.trim_start_matches('`').trim_end_matches('`').to_string(),
+                    name: name
+                        .trim_start_matches('`')
+                        .trim_end_matches('`')
+                        .to_string(),
                     description: description.clone(),
                 })
                 .collect();
@@ -205,8 +219,8 @@ pub fn generate_docs(
 }
 
 const STANDARD_MODULE_NAMES: &[&str] = &[
-    "ast", "cbor", "csv", "fuzzy", "hcl", "json", "section", "table", "test", "toml", "toon",
-    "xml", "yaml",
+    "ast", "cbor", "csv", "fuzzy", "hcl", "json", "section", "semver", "table", "test", "toml",
+    "toon", "xml", "yaml",
 ];
 
 /// Build the list of `ModuleDoc` from the given parameters.
@@ -541,7 +555,10 @@ fn format_text(module_docs: &[ModuleDoc]) -> String {
         .iter()
         .flat_map(|m| m.selectors.iter())
         .map(|[name, description]| {
-            let clean_name = name.trim_start_matches('`').trim_end_matches('`').to_string();
+            let clean_name = name
+                .trim_start_matches('`')
+                .trim_end_matches('`')
+                .to_string();
             (clean_name, truncate(description))
         })
         .collect();
