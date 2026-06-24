@@ -1432,7 +1432,7 @@ version = "0.1.25"
 dependencies = [
  "clap",
  "crossterm",
- "itertools 0.14.0",
+ "itertools 0.15.0",
  "miette",
  "mq-hir",
  "mq-lang",
