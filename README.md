@@ -7,7 +7,7 @@ A documentation generator for [mq](https://github.com/harehare/mq) functions, ma
 ## Features
 
 - Generates documentation for functions, macros, and selectors
-- Multiple output formats: Markdown, plain text, and HTML
+- Multiple output formats: Markdown, plain text, HTML, and JSON
 - HTML output includes interactive sidebar navigation, search/filter, and responsive design
 - Supports built-in modules, custom files, and loadable modules (e.g., `csv`, `json`)
 - Available as both a CLI tool and a library
@@ -70,6 +70,7 @@ mq-docs -B -M json file.mq
 mq-docs -F html > docs.html
 mq-docs -F markdown > docs.md
 mq-docs -F text
+mq-docs -F json > docs.json
 ```
 
 #### Options
@@ -78,7 +79,7 @@ mq-docs -F text
 | --------------------------- | ------------------------------------------------------------------ |
 | `[FILES]`                   | Input `.mq` files to generate documentation from                   |
 | `-M, --module-names <NAME>` | Module names to load (repeatable)                                  |
-| `-F, --format <FORMAT>`     | Output format: `markdown`, `text`, or `html` (default: `markdown`) |
+| `-F, --format <FORMAT>`     | Output format: `markdown`, `text`, `html`, or `json` (default: `markdown`) |
 | `-B, --include-builtin`     | Include built-in functions alongside modules/files                 |
 
 ### Library
@@ -99,6 +100,7 @@ fn main() -> miette::Result<()> {
 - **Markdown** - Tables suitable for rendering in documentation sites or GitHub
 - **Text** - Plain text output for terminal viewing
 - **HTML** - Self-contained single-page HTML with dark theme, sidebar navigation, search filtering, and mobile support
+- **JSON** - Array of modules, each with structured function and selector records (name, description, parameters, example), for tool-calling schema generators, editor autocomplete, or search indexes
 
 ## License
 

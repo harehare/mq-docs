@@ -1,6 +1,8 @@
 use std::collections::VecDeque;
 
 use itertools::Itertools;
+use miette::miette;
+use serde::Serialize;
 use url::Url;
 
 /// Documentation output format.
@@ -10,6 +12,7 @@ pub enum DocFormat {
     Markdown,
     Text,
     Html,
+    Json,
 }
 
 /// A single documented function or macro entry with clean (no backticks) fields.
@@ -36,6 +39,26 @@ pub struct ModuleEntry {
     pub selectors: Vec<SelectorEntry>,
 }
 
+/// Strip the markdown decoration (backticks, `~~` deprecation markers) from a
+/// raw function/macro name, returning the clean name and whether it is deprecated.
+fn clean_function_name(name: &str) -> (String, bool) {
+    let is_deprecated = name.starts_with("~~");
+    let clean_name = name
+        .trim_start_matches("~~`")
+        .trim_end_matches("`~~")
+        .trim_start_matches('`')
+        .trim_end_matches('`')
+        .to_string();
+    (clean_name, is_deprecated)
+}
+
+/// Strip the markdown backticks from a raw selector name.
+fn clean_selector_name(name: &str) -> String {
+    name.trim_start_matches('`')
+        .trim_end_matches('`')
+        .to_string()
+}
+
 /// A group of documented symbols belonging to a single module or file.
 struct ModuleDoc {
     name: String,
@@ -58,13 +81,7 @@ pub fn extract_entries(
         .iter()
         .flat_map(|m| m.symbols.iter())
         .filter_map(|[name, description, args, example]| {
-            let is_deprecated = name.starts_with("~~");
-            let clean_name = name
-                .trim_start_matches("~~`")
-                .trim_end_matches("`~~")
-                .trim_start_matches('`')
-                .trim_end_matches('`')
-                .to_string();
+            let (clean_name, is_deprecated) = clean_function_name(name);
             let clean_args = args.replace('`', "");
 
             if let Some(ref q) = filter_lower {
@@ -92,10 +109,7 @@ pub fn extract_entries(
         .iter()
         .flat_map(|m| m.selectors.iter())
         .filter_map(|[name, description]| {
-            let clean_name = name
-                .trim_start_matches('`')
-                .trim_end_matches('`')
-                .to_string();
+            let clean_name = clean_selector_name(name);
 
             if let Some(ref q) = filter_lower {
                 let haystack = format!(
@@ -126,49 +140,40 @@ pub fn extract_module_entries(
 ) -> Result<Vec<ModuleEntry>, miette::Error> {
     let module_docs = build_module_docs(module_names, files, include_builtin)?;
 
-    Ok(module_docs
-        .into_iter()
-        .map(|m| {
-            let functions = m
-                .symbols
-                .iter()
-                .map(|[name, description, args, example]| {
-                    let is_deprecated = name.starts_with("~~");
-                    let clean_name = name
-                        .trim_start_matches("~~`")
-                        .trim_end_matches("`~~")
-                        .trim_start_matches('`')
-                        .trim_end_matches('`')
-                        .to_string();
-                    DocEntry {
-                        name: clean_name,
-                        description: description.clone(),
-                        params: args.replace('`', ""),
-                        example: example.clone(),
-                        is_deprecated,
-                    }
-                })
-                .collect();
+    Ok(module_docs.iter().map(module_doc_to_entry).collect())
+}
 
-            let selectors = m
-                .selectors
-                .iter()
-                .map(|[name, description]| SelectorEntry {
-                    name: name
-                        .trim_start_matches('`')
-                        .trim_end_matches('`')
-                        .to_string(),
-                    description: description.clone(),
-                })
-                .collect();
-
-            ModuleEntry {
-                name: m.name,
-                functions,
-                selectors,
+/// Convert a raw `ModuleDoc` into a clean `ModuleEntry`.
+fn module_doc_to_entry(m: &ModuleDoc) -> ModuleEntry {
+    let functions = m
+        .symbols
+        .iter()
+        .map(|[name, description, args, example]| {
+            let (clean_name, is_deprecated) = clean_function_name(name);
+            DocEntry {
+                name: clean_name,
+                description: description.clone(),
+                params: args.replace('`', ""),
+                example: example.clone(),
+                is_deprecated,
             }
         })
-        .collect())
+        .collect();
+
+    let selectors = m
+        .selectors
+        .iter()
+        .map(|[name, description]| SelectorEntry {
+            name: clean_selector_name(name),
+            description: description.clone(),
+        })
+        .collect();
+
+    ModuleEntry {
+        name: m.name.clone(),
+        functions,
+        selectors,
+    }
 }
 
 /// Generate documentation for mq functions, macros, and selectors.
@@ -215,6 +220,7 @@ pub fn generate_docs(
         DocFormat::Markdown => format_markdown(&module_docs),
         DocFormat::Text => Ok(format_text(&module_docs)),
         DocFormat::Html => Ok(format_html(&module_docs)),
+        DocFormat::Json => format_json(&module_docs),
     }
 }
 
@@ -535,12 +541,7 @@ fn format_text(module_docs: &[ModuleDoc]) -> String {
         .iter()
         .flat_map(|m| m.symbols.iter())
         .map(|[name, description, args, example]| {
-            let clean_name = name
-                .trim_start_matches("~~`")
-                .trim_end_matches("`~~")
-                .trim_start_matches('`')
-                .trim_end_matches('`')
-                .to_string();
+            let (clean_name, _) = clean_function_name(name);
             let clean_args = args.replace('`', "");
             (
                 clean_name,
@@ -555,10 +556,7 @@ fn format_text(module_docs: &[ModuleDoc]) -> String {
         .iter()
         .flat_map(|m| m.selectors.iter())
         .map(|[name, description]| {
-            let clean_name = name
-                .trim_start_matches('`')
-                .trim_end_matches('`')
-                .to_string();
+            let clean_name = clean_selector_name(name);
             (clean_name, truncate(description))
         })
         .collect();
@@ -666,6 +664,69 @@ fn format_text(module_docs: &[ModuleDoc]) -> String {
     }
 
     result
+}
+
+/// A JSON-serializable function/macro record.
+#[derive(Serialize)]
+struct JsonFunction<'a> {
+    name: &'a str,
+    description: &'a str,
+    parameters: Vec<&'a str>,
+    example: &'a str,
+    is_deprecated: bool,
+}
+
+/// A JSON-serializable selector record.
+#[derive(Serialize)]
+struct JsonSelector<'a> {
+    name: &'a str,
+    description: &'a str,
+}
+
+/// A JSON-serializable group of function and selector records for a single module or file.
+#[derive(Serialize)]
+struct JsonModule<'a> {
+    name: &'a str,
+    functions: Vec<JsonFunction<'a>>,
+    selectors: Vec<JsonSelector<'a>>,
+}
+
+/// Format documentation as JSON: an array of modules, each with clean
+/// function and selector records (name, description, parameters, example).
+fn format_json(module_docs: &[ModuleDoc]) -> Result<String, miette::Error> {
+    let entries: Vec<ModuleEntry> = module_docs.iter().map(module_doc_to_entry).collect();
+
+    let modules: Vec<JsonModule> = entries
+        .iter()
+        .map(|m| JsonModule {
+            name: &m.name,
+            functions: m
+                .functions
+                .iter()
+                .map(|f| JsonFunction {
+                    name: &f.name,
+                    description: &f.description,
+                    parameters: if f.params.is_empty() {
+                        Vec::new()
+                    } else {
+                        f.params.split(", ").collect()
+                    },
+                    example: &f.example,
+                    is_deprecated: f.is_deprecated,
+                })
+                .collect(),
+            selectors: m
+                .selectors
+                .iter()
+                .map(|s| JsonSelector {
+                    name: &s.name,
+                    description: &s.description,
+                })
+                .collect(),
+        })
+        .collect();
+
+    serde_json::to_string_pretty(&modules).map_err(|e| miette!("{e}"))
 }
 
 /// Build HTML table rows for a set of symbols.
