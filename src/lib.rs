@@ -1,9 +1,10 @@
-use std::collections::VecDeque;
+use std::fmt::Write as _;
 
 use itertools::Itertools;
 use miette::miette;
 use serde::Serialize;
-use url::Url;
+
+pub use mq_help::{HelpEntry as DocEntry, HelpExample as DocExample, HelpParam as DocParam};
 
 /// Documentation output format.
 #[derive(Clone, Debug, Default, clap::ValueEnum)]
@@ -15,119 +16,39 @@ pub enum DocFormat {
     Json,
 }
 
-/// A single documented function or macro entry with clean (no backticks) fields.
-#[derive(Clone)]
-pub struct DocEntry {
-    pub name: String,
-    pub description: String,
-    pub params: String,
-    pub example: String,
-    pub is_deprecated: bool,
-}
-
-/// A single documented selector entry with clean (no backticks) fields.
-#[derive(Clone)]
-pub struct SelectorEntry {
-    pub name: String,
-    pub description: String,
-}
-
-/// A group of documented entries belonging to a single module or file.
+/// A group of documented functions and selectors belonging to a single module or file.
 pub struct ModuleEntry {
     pub name: String,
+    pub description: String,
+    pub examples: Vec<DocExample>,
     pub functions: Vec<DocEntry>,
-    pub selectors: Vec<SelectorEntry>,
+    pub selectors: Vec<DocEntry>,
 }
 
-/// Strip the markdown decoration (backticks, `~~` deprecation markers) from a
-/// raw function/macro name, returning the clean name and whether it is deprecated.
-fn clean_function_name(name: &str) -> (String, bool) {
-    let is_deprecated = name.starts_with("~~");
-    let clean_name = name
-        .trim_start_matches("~~`")
-        .trim_end_matches("`~~")
-        .trim_start_matches('`')
-        .trim_end_matches('`')
-        .to_string();
-    (clean_name, is_deprecated)
+/// Whether an entry's description carries mq-hir's own "deprecated" marker convention
+/// (a case-insensitive `deprecated` substring) — mirrored here since `mq-help` entries
+/// don't carry a dedicated flag.
+pub fn is_deprecated(entry: &DocEntry) -> bool {
+    entry.description.to_lowercase().contains("deprecated")
 }
 
-/// Strip the markdown backticks from a raw selector name.
-fn clean_selector_name(name: &str) -> String {
-    name.trim_start_matches('`')
-        .trim_end_matches('`')
-        .to_string()
-}
-
-/// A group of documented symbols belonging to a single module or file.
-struct ModuleDoc {
-    name: String,
-    symbols: VecDeque<[String; 4]>,
-    selectors: VecDeque<[String; 2]>,
-}
-
-/// Extract clean `DocEntry` and `SelectorEntry` values, optionally filtered by a search term.
+/// Extract flattened, optionally filtered function and selector entries.
 pub fn extract_entries(
     module_names: &Option<Vec<String>>,
     files: &Option<Vec<(String, String)>>,
     include_builtin: bool,
     filter: Option<&str>,
-) -> Result<(Vec<DocEntry>, Vec<SelectorEntry>), miette::Error> {
-    let module_docs = build_module_docs(module_names, files, include_builtin)?;
-
+) -> Result<(Vec<DocEntry>, Vec<DocEntry>), miette::Error> {
+    let modules = build_modules(module_names, files, include_builtin)?;
     let filter_lower = filter.map(|f| f.to_lowercase());
-
-    let functions: Vec<DocEntry> = module_docs
-        .iter()
-        .flat_map(|m| m.symbols.iter())
-        .filter_map(|[name, description, args, example]| {
-            let (clean_name, is_deprecated) = clean_function_name(name);
-            let clean_args = args.replace('`', "");
-
-            if let Some(ref q) = filter_lower {
-                let haystack = format!(
-                    "{} {}",
-                    clean_name.to_lowercase(),
-                    description.to_lowercase()
-                );
-                if !haystack.contains(q.as_str()) {
-                    return None;
-                }
-            }
-
-            Some(DocEntry {
-                name: clean_name,
-                description: description.clone(),
-                params: clean_args,
-                example: example.clone(),
-                is_deprecated,
-            })
+    let matches = |e: &&DocEntry| {
+        filter_lower.as_ref().is_none_or(|q| {
+            e.name.to_lowercase().contains(q.as_str()) || e.description.to_lowercase().contains(q.as_str())
         })
-        .collect();
+    };
 
-    let selectors: Vec<SelectorEntry> = module_docs
-        .iter()
-        .flat_map(|m| m.selectors.iter())
-        .filter_map(|[name, description]| {
-            let clean_name = clean_selector_name(name);
-
-            if let Some(ref q) = filter_lower {
-                let haystack = format!(
-                    "{} {}",
-                    clean_name.to_lowercase(),
-                    description.to_lowercase()
-                );
-                if !haystack.contains(q.as_str()) {
-                    return None;
-                }
-            }
-
-            Some(SelectorEntry {
-                name: clean_name,
-                description: description.clone(),
-            })
-        })
-        .collect();
+    let functions = modules.iter().flat_map(|m| m.functions.iter()).filter(matches).cloned().collect();
+    let selectors = modules.iter().flat_map(|m| m.selectors.iter()).filter(matches).cloned().collect();
 
     Ok((functions, selectors))
 }
@@ -138,42 +59,7 @@ pub fn extract_module_entries(
     files: &Option<Vec<(String, String)>>,
     include_builtin: bool,
 ) -> Result<Vec<ModuleEntry>, miette::Error> {
-    let module_docs = build_module_docs(module_names, files, include_builtin)?;
-
-    Ok(module_docs.iter().map(module_doc_to_entry).collect())
-}
-
-/// Convert a raw `ModuleDoc` into a clean `ModuleEntry`.
-fn module_doc_to_entry(m: &ModuleDoc) -> ModuleEntry {
-    let functions = m
-        .symbols
-        .iter()
-        .map(|[name, description, args, example]| {
-            let (clean_name, is_deprecated) = clean_function_name(name);
-            DocEntry {
-                name: clean_name,
-                description: description.clone(),
-                params: args.replace('`', ""),
-                example: example.clone(),
-                is_deprecated,
-            }
-        })
-        .collect();
-
-    let selectors = m
-        .selectors
-        .iter()
-        .map(|[name, description]| SelectorEntry {
-            name: clean_selector_name(name),
-            description: description.clone(),
-        })
-        .collect();
-
-    ModuleEntry {
-        name: m.name.clone(),
-        functions,
-        selectors,
-    }
+    build_modules(module_names, files, include_builtin)
 }
 
 /// Generate documentation for mq functions, macros, and selectors.
@@ -189,648 +75,455 @@ pub fn generate_docs(
     include_builtin: bool,
     filter: Option<&str>,
 ) -> Result<String, miette::Error> {
-    let mut module_docs = build_module_docs(module_names, files, include_builtin)?;
+    let mut modules = build_modules(module_names, files, include_builtin)?;
 
-    // Apply filter if provided
     if let Some(q) = filter {
         let q_lower = q.to_lowercase();
-        for m in &mut module_docs {
-            m.symbols.retain(|[name, description, _, _]| {
-                let clean_name = name
-                    .trim_start_matches("~~`")
-                    .trim_end_matches("`~~")
-                    .trim_start_matches('`')
-                    .trim_end_matches('`')
-                    .to_lowercase();
-                let desc_lower = description.to_lowercase();
-                clean_name.contains(&q_lower) || desc_lower.contains(&q_lower)
-            });
-            m.selectors.retain(|[name, description]| {
-                let clean_name = name
-                    .trim_start_matches('`')
-                    .trim_end_matches('`')
-                    .to_lowercase();
-                let desc_lower = description.to_lowercase();
-                clean_name.contains(&q_lower) || desc_lower.contains(&q_lower)
-            });
+        let keep = |e: &DocEntry| {
+            e.name.to_lowercase().contains(&q_lower) || e.description.to_lowercase().contains(&q_lower)
+        };
+        for m in &mut modules {
+            m.functions.retain(keep);
+            m.selectors.retain(keep);
         }
     }
 
     match format {
-        DocFormat::Markdown => format_markdown(&module_docs),
-        DocFormat::Text => Ok(format_text(&module_docs)),
-        DocFormat::Html => Ok(format_html(&module_docs)),
-        DocFormat::Json => format_json(&module_docs),
+        DocFormat::Markdown => Ok(format_markdown(&modules)),
+        DocFormat::Text => Ok(format_text(&modules)),
+        DocFormat::Html => Ok(format_html(&modules)),
+        DocFormat::Json => format_json(&modules),
     }
 }
 
-const STANDARD_MODULE_NAMES: &[&str] = &[
-    "ast", "cbor", "csv", "fuzzy", "hcl", "json", "section", "semver", "table", "test", "toml",
-    "toon", "xml", "yaml",
-];
-
-/// Build the list of `ModuleDoc` from the given parameters.
-fn build_module_docs(
+/// Build the list of `ModuleEntry` from the given parameters, backed by `mq-help`'s unified
+/// documentation catalog (native builtins, selectors, and every standard module), so the
+/// same real, verified examples shown by `mq help` are available here.
+fn build_modules(
     module_names: &Option<Vec<String>>,
     files: &Option<Vec<(String, String)>>,
     include_builtin: bool,
-) -> Result<Vec<ModuleDoc>, miette::Error> {
+) -> Result<Vec<ModuleEntry>, miette::Error> {
     let has_files = files.as_ref().is_some_and(|f| !f.is_empty());
     let has_modules = module_names.as_ref().is_some_and(|m| !m.is_empty());
 
-    let module_docs = if has_files || has_modules {
-        let mut docs = Vec::new();
+    if !has_files && !has_modules {
+        let mut modules = vec![builtin_module()];
+        modules.extend(mq_help::all_modules().into_iter().map(standard_module));
+        return Ok(modules);
+    }
 
-        if include_builtin || has_modules {
-            let mut hir = mq_hir::Hir::default();
-            hir.add_code(None, "");
-            docs.push(ModuleDoc {
-                name: "Built-in".to_string(),
-                symbols: extract_symbols(&hir, None),
-                selectors: extract_selectors(&hir),
+    let mut modules = Vec::new();
+
+    if include_builtin {
+        modules.push(builtin_module());
+    }
+
+    if let Some(names) = module_names {
+        for name in names {
+            modules.push(match mq_help::lookup_module(name) {
+                Some(m) => standard_module(m),
+                None => generic_module(name)?,
             });
         }
+    }
 
-        if has_modules {
-            let specified: Vec<&str> = module_names
-                .as_deref()
-                .unwrap_or_default()
-                .iter()
-                .map(|s| s.as_str())
-                .collect();
-
-            for &std_name in STANDARD_MODULE_NAMES {
-                if specified.contains(&std_name) {
-                    continue;
-                }
-                let mut hir = mq_hir::Hir::default();
-                hir.builtin.disabled = true;
-                hir.add_code(None, &format!("include \"{std_name}\""));
-
-                let source_id = hir.symbols().find_map(|(_, symbol)| {
-                    if let mq_hir::Symbol {
-                        kind: mq_hir::SymbolKind::Include(module_source_id),
-                        ..
-                    } = &symbol
-                    {
-                        Some(module_source_id)
-                    } else {
-                        None
-                    }
-                });
-
-                docs.push(ModuleDoc {
-                    name: std_name.to_string(),
-                    symbols: extract_symbols(&hir, source_id),
-                    selectors: extract_selectors(&hir),
-                });
-            }
+    if let Some(file_contents) = files {
+        for (filename, content) in file_contents {
+            modules.push(file_module(filename, content));
         }
+    }
 
-        if let Some(file_contents) = files {
-            for (filename, content) in file_contents {
-                let mut hir = mq_hir::Hir::default();
-                hir.builtin.disabled = true;
-                let url = Url::parse(&format!("file:///{filename}")).ok();
-                let (source_id, _) = hir.add_code(url, content);
-                docs.push(ModuleDoc {
-                    name: filename.clone(),
-                    symbols: extract_symbols(&hir, Some(&source_id)),
-                    selectors: extract_selectors(&hir),
-                });
-            }
-        }
-
-        if let Some(module_names) = module_names {
-            for module_name in module_names {
-                let mut hir = mq_hir::Hir::default();
-                hir.builtin.disabled = true;
-                hir.add_code(None, &format!("include \"{module_name}\""));
-
-                let source_id = hir.symbols().find_map(|(_, symbol)| {
-                    if let mq_hir::Symbol {
-                        kind: mq_hir::SymbolKind::Include(module_source_id),
-                        ..
-                    } = &symbol
-                    {
-                        Some(module_source_id)
-                    } else {
-                        None
-                    }
-                });
-
-                docs.push(ModuleDoc {
-                    name: module_name.clone(),
-                    symbols: extract_symbols(&hir, source_id),
-                    selectors: extract_selectors(&hir),
-                });
-            }
-        }
-
-        docs
-    } else {
-        let mut docs = Vec::new();
-
-        let mut hir = mq_hir::Hir::default();
-        hir.add_code(None, "");
-        docs.push(ModuleDoc {
-            name: "Built-in".to_string(),
-            symbols: extract_symbols(&hir, None),
-            selectors: extract_selectors(&hir),
-        });
-
-        for &std_name in STANDARD_MODULE_NAMES {
-            let mut hir = mq_hir::Hir::default();
-            hir.builtin.disabled = true;
-            hir.add_code(None, &format!("include \"{std_name}\""));
-
-            let source_id = hir.symbols().find_map(|(_, symbol)| {
-                if let mq_hir::Symbol {
-                    kind: mq_hir::SymbolKind::Include(module_source_id),
-                    ..
-                } = &symbol
-                {
-                    Some(module_source_id)
-                } else {
-                    None
-                }
-            });
-
-            docs.push(ModuleDoc {
-                name: std_name.to_string(),
-                symbols: extract_symbols(&hir, source_id),
-                selectors: extract_selectors(&hir),
-            });
-        }
-
-        docs
-    };
-
-    Ok(module_docs)
+    Ok(modules)
 }
 
-/// Extract function and macro symbols from HIR.
-fn extract_symbols(
-    hir: &mq_hir::Hir,
-    source_id: Option<&mq_hir::SourceId>,
-) -> VecDeque<[String; 4]> {
-    hir.symbols()
+/// Native builtins, `builtin.mq` functions, and native selectors.
+fn builtin_module() -> ModuleEntry {
+    let (functions, selectors) = mq_help::top_level_entries().into_iter().partition(|e| e.kind == "function");
+    ModuleEntry {
+        name: "Built-in".to_string(),
+        description: String::new(),
+        examples: Vec::new(),
+        functions,
+        selectors,
+    }
+}
+
+fn standard_module(m: mq_help::HelpModule) -> ModuleEntry {
+    ModuleEntry {
+        name: m.name,
+        description: m.description,
+        examples: m.examples,
+        functions: m.functions,
+        selectors: Vec::new(),
+    }
+}
+
+/// Document an arbitrary `.mq` file by parsing its doc comments the same way `mq-help` does
+/// for standard modules, so user-authored files get real (not synthesized) examples too.
+fn file_module(filename: &str, content: &str) -> ModuleEntry {
+    let (doc, fdocs) = mq_help::extract_module(content, false);
+    let functions = fdocs.into_iter().map(|f| from_mq_fn_doc(f, None)).collect();
+
+    ModuleEntry {
+        name: filename.to_string(),
+        description: doc.as_ref().map(|d| d.description.clone()).unwrap_or_default(),
+        examples: doc
+            .map(|d| {
+                d.examples
+                    .into_iter()
+                    .map(|e| DocExample { code: e.code, expected: e.expected })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        functions,
+        selectors: Vec::new(),
+    }
+}
+
+/// Fallback for a `-M` module name that isn't one of `mq-help`'s compiled-in standard
+/// modules — resolved generically via `include "name"`, the same mechanism mq itself uses.
+/// Real examples/return types aren't available this way, only name/params/description.
+fn generic_module(module_name: &str) -> Result<ModuleEntry, miette::Error> {
+    let mut hir = mq_hir::Hir::default();
+    hir.builtin.disabled = true;
+    hir.add_code(None, &format!("include \"{module_name}\""));
+
+    let source_id = hir.symbols().find_map(|(_, symbol)| {
+        if let mq_hir::Symbol { kind: mq_hir::SymbolKind::Include(module_source_id), .. } = &symbol {
+            Some(*module_source_id)
+        } else {
+            None
+        }
+    });
+
+    let functions = hir
+        .symbols()
         .sorted_by_key(|(_, symbol)| symbol.value.clone())
         .filter_map(|(_, symbol)| {
             if let Some(sid) = source_id
-                && let Some(symbol_sid) = symbol.source.source_id
-                && symbol_sid != *sid
+                && symbol.source.source_id != Some(sid)
             {
                 return None;
             }
 
-            match symbol {
-                mq_hir::Symbol {
-                    kind: mq_hir::SymbolKind::Function(params),
-                    value: Some(value),
-                    doc,
-                    ..
-                }
-                | mq_hir::Symbol {
-                    kind: mq_hir::SymbolKind::Macro(params),
-                    value: Some(value),
-                    doc,
-                    ..
-                } if !symbol.is_internal_function() => {
-                    let name = if symbol.is_deprecated() {
-                        format!("~~`{}`~~", value)
-                    } else {
-                        format!("`{}`", value)
-                    };
-                    let description = doc.iter().map(|(_, d)| d.to_string()).join("\n");
-                    let args = params.iter().map(|p| format!("`{}`", p.name)).join(", ");
-                    let example = format!(
-                        "{}({})",
-                        value,
-                        params.iter().map(|p| p.name.as_str()).join(", ")
-                    );
-
-                    Some([name, description, args, example])
+            match &symbol {
+                mq_hir::Symbol { kind: mq_hir::SymbolKind::Function(params), value: Some(value), doc, .. }
+                | mq_hir::Symbol { kind: mq_hir::SymbolKind::Macro(params), value: Some(value), doc, .. }
+                    if !symbol.is_internal_function() =>
+                {
+                    Some(DocEntry {
+                        name: value.to_string(),
+                        kind: "function",
+                        params: params
+                            .iter()
+                            .map(|p| DocParam { name: p.name.to_string(), type_name: "dynamic".to_string() })
+                            .collect(),
+                        returns: "dynamic".to_string(),
+                        description: doc.iter().map(|(_, d)| d.to_string()).join("\n"),
+                        examples: Vec::new(),
+                        capability: None,
+                        related_module: Some(module_name.to_string()),
+                    })
                 }
                 _ => None,
             }
         })
-        .collect()
+        .collect();
+
+    Ok(ModuleEntry {
+        name: module_name.to_string(),
+        description: String::new(),
+        examples: Vec::new(),
+        functions,
+        selectors: Vec::new(),
+    })
 }
 
-/// Extract selector symbols from HIR.
-fn extract_selectors(hir: &mq_hir::Hir) -> VecDeque<[String; 2]> {
-    hir.symbols()
-        .sorted_by_key(|(_, symbol)| symbol.value.clone())
-        .filter_map(|(_, symbol)| match symbol {
-            mq_hir::Symbol {
-                kind: mq_hir::SymbolKind::Selector(s),
-                value: Some(value),
-                doc,
-                ..
-            } if !s.is_attribute_selector() => {
-                let name = format!("`{}`", value);
-                let description = doc.iter().map(|(_, d)| d.to_string()).join("\n");
-                Some([name, description])
+fn from_mq_fn_doc(f: mq_help::MqFnDoc, related_module: Option<String>) -> DocEntry {
+    DocEntry {
+        name: f.name,
+        kind: "function",
+        params: f.params.into_iter().map(|name| DocParam { name, type_name: "dynamic".to_string() }).collect(),
+        returns: f.returns.unwrap_or_else(|| "dynamic".to_string()),
+        description: f.description,
+        examples: f.examples.into_iter().map(|e| DocExample { code: e.code, expected: e.expected }).collect(),
+        capability: None,
+        related_module,
+    }
+}
+
+/// Format documentation as Markdown, reusing `mq-help`'s own per-entry renderer so mq-docs
+/// and `mq help --markdown` can never drift apart on how a function/example is shown.
+fn format_markdown(modules: &[ModuleEntry]) -> String {
+    let mut out = String::new();
+
+    for m in modules {
+        if m.functions.is_empty() && m.selectors.is_empty() {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push_str("\n\n");
+        }
+
+        let _ = writeln!(out, "# {}", m.name);
+        if !m.description.is_empty() {
+            let _ = writeln!(out, "\n{}", m.description);
+        }
+        for example in &m.examples {
+            let _ = writeln!(out, "\n```mq\n{}\n```\n\nOutput:\n\n```\n{}\n```", example.code, example.expected);
+        }
+
+        for entry in m.functions.iter().chain(m.selectors.iter()) {
+            out.push('\n');
+            out.push_str(&mq_help::render_markdown(entry));
+        }
+    }
+
+    out
+}
+
+/// Format documentation as plain text: one block per entry with its signature, description,
+/// and any verified examples — the previous fixed-width table couldn't hold multi-line,
+/// possibly-multiple examples, so this format was restructured to make room for them.
+fn format_text(modules: &[ModuleEntry]) -> String {
+    let mut out = String::new();
+
+    for m in modules {
+        if m.functions.is_empty() && m.selectors.is_empty() {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push('\n');
+        }
+
+        let _ = writeln!(out, "# {}", m.name);
+        if !m.description.is_empty() {
+            let _ = writeln!(out, "\n{}", m.description);
+        }
+        for example in &m.examples {
+            let _ = writeln!(out, "\n  {}\n  #=> {}", example.code, example.expected);
+        }
+
+        if !m.functions.is_empty() {
+            let _ = writeln!(out, "\n## Functions ({})\n", m.functions.len());
+            for f in &m.functions {
+                out.push_str(&render_entry_text(f));
             }
-            _ => None,
-        })
-        .collect()
-}
-
-/// Format documentation as a Markdown table.
-fn format_markdown(module_docs: &[ModuleDoc]) -> Result<String, miette::Error> {
-    let all_symbols: VecDeque<_> = module_docs
-        .iter()
-        .flat_map(|m| m.symbols.iter())
-        .cloned()
-        .collect();
-    let all_selectors: VecDeque<_> = module_docs
-        .iter()
-        .flat_map(|m| m.selectors.iter())
-        .cloned()
-        .collect();
-
-    let sanitize = |s: &str| s.replace('\t', " ").replace('\n', " ").replace('\r', "");
-
-    let mut doc_csv = all_symbols
-        .iter()
-        .map(|[name, description, args, example]| {
-            mq_lang::RuntimeValue::String(
-                [name, description, args, example]
-                    .into_iter()
-                    .map(|s| sanitize(s))
-                    .join("\t"),
-            )
-        })
-        .collect::<VecDeque<_>>();
-
-    doc_csv.push_front(mq_lang::RuntimeValue::String(
-        ["Function Name", "Description", "Parameters", "Example"]
-            .iter()
-            .join("\t"),
-    ));
-
-    let mut engine = mq_lang::DefaultEngine::default();
-    engine.load_builtin_module();
-
-    let doc_values = engine
-        .eval(
-            r#"include "csv" | tsv_parse(false) | csv_to_markdown_table()"#,
-            mq_lang::raw_input(&doc_csv.iter().join("\n")).into_iter(),
-        )
-        .map_err(|e| *e)?;
-
-    let mut result = doc_values.values().iter().map(|v| v.to_string()).join("\n");
-
-    if !all_selectors.is_empty() {
-        let mut selector_csv = all_selectors
-            .iter()
-            .map(|[name, description]| {
-                mq_lang::RuntimeValue::String(
-                    [name.as_str(), description.as_str()]
-                        .into_iter()
-                        .map(|s| sanitize(s))
-                        .join("\t"),
-                )
-            })
-            .collect::<VecDeque<_>>();
-
-        selector_csv.push_front(mq_lang::RuntimeValue::String(
-            ["Selector", "Description"].iter().join("\t"),
-        ));
-
-        let mut engine = mq_lang::DefaultEngine::default();
-        engine.load_builtin_module();
-
-        let selector_values = engine
-            .eval(
-                r#"include "csv" | tsv_parse(false) | csv_to_markdown_table()"#,
-                mq_lang::raw_input(&selector_csv.iter().join("\n")).into_iter(),
-            )
-            .map_err(|e| *e)?;
-
-        result.push_str("\n\n## Selectors\n\n");
-        result.push_str(
-            &selector_values
-                .values()
-                .iter()
-                .map(|v| v.to_string())
-                .join("\n"),
-        );
-    }
-
-    Ok(result)
-}
-
-/// Format documentation as a column-aligned plain-text table.
-fn format_text(module_docs: &[ModuleDoc]) -> String {
-    const MAX_DESC_LEN: usize = 50;
-
-    let truncate = |s: &str| -> String {
-        let s = s.replace('\n', " ");
-        if s.chars().count() > MAX_DESC_LEN {
-            let truncated: String = s.chars().take(MAX_DESC_LEN - 1).collect();
-            format!("{truncated}…")
-        } else {
-            s
         }
-    };
-
-    let functions: Vec<(String, String, String, String)> = module_docs
-        .iter()
-        .flat_map(|m| m.symbols.iter())
-        .map(|[name, description, args, example]| {
-            let (clean_name, _) = clean_function_name(name);
-            let clean_args = args.replace('`', "");
-            (
-                clean_name,
-                truncate(description),
-                clean_args,
-                example.clone(),
-            )
-        })
-        .collect();
-
-    let selectors: Vec<(String, String)> = module_docs
-        .iter()
-        .flat_map(|m| m.selectors.iter())
-        .map(|[name, description]| {
-            let clean_name = clean_selector_name(name);
-            (clean_name, truncate(description))
-        })
-        .collect();
-
-    let mut result = String::new();
-
-    if !functions.is_empty() {
-        // Compute column widths
-        let w_name = functions
-            .iter()
-            .map(|(n, _, _, _)| n.len())
-            .max()
-            .unwrap_or(0)
-            .max("FUNCTION".len());
-        let w_desc = functions
-            .iter()
-            .map(|(_, d, _, _)| d.chars().count())
-            .max()
-            .unwrap_or(0)
-            .max("DESCRIPTION".len());
-        let w_params = functions
-            .iter()
-            .map(|(_, _, p, _)| p.len())
-            .max()
-            .unwrap_or(0)
-            .max("PARAMETERS".len());
-        let w_example = functions
-            .iter()
-            .map(|(_, _, _, e)| e.len())
-            .max()
-            .unwrap_or(0)
-            .max("EXAMPLE".len());
-
-        let total = w_name + w_desc + w_params + w_example + 9; // 3 gaps of 3 spaces
-
-        // Header
-        result.push_str(&format!(
-            "{:<w_name$}   {:<w_desc$}   {:<w_params$}   {:<w_example$}\n",
-            "FUNCTION",
-            "DESCRIPTION",
-            "PARAMETERS",
-            "EXAMPLE",
-            w_name = w_name,
-            w_desc = w_desc,
-            w_params = w_params,
-            w_example = w_example,
-        ));
-        result.push_str(&"─".repeat(total));
-        result.push('\n');
-
-        for (name, desc, params, example) in &functions {
-            result.push_str(&format!(
-                "{:<w_name$}   {:<w_desc$}   {:<w_params$}   {:<w_example$}\n",
-                name,
-                desc,
-                params,
-                example,
-                w_name = w_name,
-                w_desc = w_desc,
-                w_params = w_params,
-                w_example = w_example,
-            ));
+        if !m.selectors.is_empty() {
+            let _ = writeln!(out, "\n## Selectors ({})\n", m.selectors.len());
+            for s in &m.selectors {
+                out.push_str(&render_entry_text(s));
+            }
         }
     }
 
-    if !selectors.is_empty() {
-        if !result.is_empty() {
-            result.push('\n');
-        }
-
-        let w_name = selectors
-            .iter()
-            .map(|(n, _)| n.len())
-            .max()
-            .unwrap_or(0)
-            .max("SELECTOR".len());
-        let w_desc = selectors
-            .iter()
-            .map(|(_, d)| d.chars().count())
-            .max()
-            .unwrap_or(0)
-            .max("DESCRIPTION".len());
-
-        let total = w_name + w_desc + 3;
-
-        result.push_str(&format!(
-            "{:<w_name$}   {:<w_desc$}\n",
-            "SELECTOR",
-            "DESCRIPTION",
-            w_name = w_name,
-            w_desc = w_desc,
-        ));
-        result.push_str(&"─".repeat(total));
-        result.push('\n');
-
-        for (name, desc) in &selectors {
-            result.push_str(&format!(
-                "{:<w_name$}   {:<w_desc$}\n",
-                name,
-                desc,
-                w_name = w_name,
-                w_desc = w_desc,
-            ));
-        }
-    }
-
-    result
+    out
 }
 
-/// A JSON-serializable function/macro record.
+fn render_entry_text(e: &DocEntry) -> String {
+    let mut out = String::new();
+    let params = e.params.iter().map(|p| format!("{}: {}", p.name, p.type_name)).join(", ");
+    let deprecated = if is_deprecated(e) { " [deprecated]" } else { "" };
+
+    let _ = writeln!(out, "{}({}): {}{}", e.name, params, e.returns, deprecated);
+    if !e.description.is_empty() {
+        let _ = writeln!(out, "  {}", e.description);
+    }
+    if let Some(module) = &e.related_module {
+        let _ = writeln!(out, "  Module: import \"{module}\" | {module}::{}(...)", e.name);
+    }
+    if let Some(cap) = &e.capability {
+        let _ = writeln!(out, "  Capability: requires `{cap}` (not available via the hosted Web API/playground)");
+    }
+    for example in &e.examples {
+        let _ = writeln!(out, "  Example:");
+        let _ = writeln!(out, "    {}", example.code.replace('\n', "\n    "));
+        let _ = writeln!(out, "    #=> {}", example.expected.replace('\n', "\n    "));
+    }
+    out.push('\n');
+
+    out
+}
+
+/// A documentation entry plus its computed deprecation flag, for JSON output.
 #[derive(Serialize)]
-struct JsonFunction<'a> {
-    name: &'a str,
-    description: &'a str,
-    parameters: Vec<&'a str>,
-    example: &'a str,
+struct JsonEntry<'a> {
+    #[serde(flatten)]
+    entry: &'a DocEntry,
     is_deprecated: bool,
 }
 
-/// A JSON-serializable selector record.
-#[derive(Serialize)]
-struct JsonSelector<'a> {
-    name: &'a str,
-    description: &'a str,
-}
-
-/// A JSON-serializable group of function and selector records for a single module or file.
 #[derive(Serialize)]
 struct JsonModule<'a> {
     name: &'a str,
-    functions: Vec<JsonFunction<'a>>,
-    selectors: Vec<JsonSelector<'a>>,
+    description: &'a str,
+    examples: &'a [DocExample],
+    functions: Vec<JsonEntry<'a>>,
+    selectors: Vec<JsonEntry<'a>>,
 }
 
-/// Format documentation as JSON: an array of modules, each with clean
-/// function and selector records (name, description, parameters, example).
-fn format_json(module_docs: &[ModuleDoc]) -> Result<String, miette::Error> {
-    let entries: Vec<ModuleEntry> = module_docs.iter().map(module_doc_to_entry).collect();
+/// Format documentation as JSON: an array of modules, each with its own description/examples
+/// plus structured function and selector records (params, return type, examples, capability).
+fn to_json_entries(entries: &[DocEntry]) -> Vec<JsonEntry<'_>> {
+    entries.iter().map(|e| JsonEntry { entry: e, is_deprecated: is_deprecated(e) }).collect()
+}
 
-    let modules: Vec<JsonModule> = entries
+fn format_json(modules: &[ModuleEntry]) -> Result<String, miette::Error> {
+    let json_modules: Vec<JsonModule> = modules
         .iter()
         .map(|m| JsonModule {
             name: &m.name,
-            functions: m
-                .functions
-                .iter()
-                .map(|f| JsonFunction {
-                    name: &f.name,
-                    description: &f.description,
-                    parameters: if f.params.is_empty() {
-                        Vec::new()
-                    } else {
-                        f.params.split(", ").collect()
-                    },
-                    example: &f.example,
-                    is_deprecated: f.is_deprecated,
-                })
-                .collect(),
-            selectors: m
-                .selectors
-                .iter()
-                .map(|s| JsonSelector {
-                    name: &s.name,
-                    description: &s.description,
-                })
-                .collect(),
+            description: &m.description,
+            examples: &m.examples,
+            functions: to_json_entries(&m.functions),
+            selectors: to_json_entries(&m.selectors),
         })
         .collect();
 
-    serde_json::to_string_pretty(&modules).map_err(|e| miette!("{e}"))
+    serde_json::to_string_pretty(&json_modules).map_err(|e| miette!("{e}"))
 }
 
-/// Build HTML table rows for a set of symbols.
-fn build_table_rows(symbols: &VecDeque<[String; 4]>) -> String {
-    symbols
-        .iter()
-        .map(|[name, description, args, example]| {
-            let name_html = if name.starts_with("~~") {
-                let inner = name.trim_start_matches("~~`").trim_end_matches("`~~");
-                format!("<del><code>{}</code></del>", escape_html(inner))
-            } else {
-                let inner = name.trim_start_matches('`').trim_end_matches('`');
-                format!("<code>{}</code>", escape_html(inner))
-            };
-            let args_html = args
-                .split(", ")
-                .filter(|a| !a.is_empty())
-                .map(|a| {
-                    let inner = a.trim_start_matches('`').trim_end_matches('`');
-                    format!("<code>{}</code>", escape_html(inner))
-                })
-                .join(", ");
-            let desc_html = escape_html(description);
-            let example_html = escape_html(example);
-
-            format!(
-                "                <tr>\n\
-                 \x20                 <td>{name_html}</td>\n\
-                 \x20                 <td>{desc_html}</td>\n\
-                 \x20                 <td>{args_html}</td>\n\
-                 \x20                 <td><code>{example_html}</code></td>\n\
-                 \x20               </tr>"
-            )
-        })
-        .join("\n")
-}
-
-/// Build HTML table rows for a set of selectors.
-fn build_selector_table_rows(selectors: &VecDeque<[String; 2]>) -> String {
-    selectors
-        .iter()
-        .map(|[name, description]| {
-            let inner = name.trim_start_matches('`').trim_end_matches('`');
-            let name_html = format!("<code>{}</code>", escape_html(inner));
-            let desc_html = escape_html(description);
-
-            format!(
-                "                <tr>\n\
-                 \x20                 <td>{name_html}</td>\n\
-                 \x20                 <td>{desc_html}</td>\n\
-                 \x20               </tr>"
-            )
-        })
-        .join("\n")
-}
-
-/// Build a module page HTML block.
-fn build_module_page(id: &str, symbols: &VecDeque<[String; 4]>, active: bool) -> String {
-    let rows = build_table_rows(symbols);
-    let count = symbols.len();
-    let active_class = if active { " active" } else { "" };
+/// Render one labeled example: a "Example"-labeled code block for the query, paired with a
+/// "Result"-labeled block for its verified output — symmetric labels rather than a floating
+/// arrow glyph, which renders inconsistently across fonts and is fragile to align.
+fn render_example_html(example: &DocExample, label: &str) -> String {
     format!(
-        "<div class=\"module-page{active_class}\" id=\"{id}\">\n\
-         \x20 <div class=\"search-box\">\n\
-         \x20   <svg class=\"search-icon\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><circle cx=\"11\" cy=\"11\" r=\"8\"/><line x1=\"21\" y1=\"21\" x2=\"16.65\" y2=\"16.65\"/></svg>\n\
-         \x20   <input type=\"text\" class=\"search-input\" placeholder=\"Filter functions...\" />\n\
+        "<div class=\"example\">\n\
+         \x20 <div class=\"example-label\">{}</div>\n\
+         \x20 <pre class=\"example-code\"><code>{}</code></pre>\n\
+         \x20 <div class=\"example-label\">Result</div>\n\
+         \x20 <pre class=\"example-result\"><code>{}</code></pre>\n\
+         </div>",
+        escape_html(label),
+        escape_html(&example.code),
+        escape_html(&example.expected)
+    )
+}
+
+/// "Example" for a single example, "Example 1"/"Example 2"/... when a function documents
+/// several — numbering only appears when it's actually meaningful.
+fn render_examples_html(examples: &[DocExample]) -> String {
+    examples
+        .iter()
+        .enumerate()
+        .map(|(i, ex)| {
+            let label =
+                if examples.len() > 1 { format!("Example {}", i + 1) } else { "Example".to_string() };
+            render_example_html(ex, &label)
+        })
+        .join("\n")
+}
+
+/// Render a single function/selector as a self-contained card: signature, badges,
+/// description, related-module usage, and every verified example.
+fn render_entry_html(entry: &DocEntry) -> String {
+    let params = entry
+        .params
+        .iter()
+        .map(|p| format!("{}: {}", escape_html(&p.name), escape_html(&p.type_name)))
+        .join(", ");
+    let sig = format!(
+        "<span class=\"entry-name\">{}</span>({params}): {}",
+        escape_html(&entry.name),
+        escape_html(&entry.returns)
+    );
+
+    let is_selector = entry.kind == "selector";
+    let kind_label = if is_selector { "selector" } else { "function" };
+    let kind_class = if is_selector { "badge-kind-selector" } else { "badge-kind-function" };
+    let mut badges = format!("<span class=\"badge {kind_class}\">{kind_label}</span>");
+    if is_deprecated(entry) {
+        badges.push_str("<span class=\"badge badge-deprecated\">Deprecated</span>");
+    }
+    if let Some(cap) = &entry.capability {
+        badges.push_str(&format!(
+            "<span class=\"badge badge-capability\" title=\"Not available via the hosted Web API/playground\">requires {}</span>",
+            escape_html(cap)
+        ));
+    }
+
+    let description_html = if entry.description.is_empty() {
+        String::new()
+    } else {
+        format!("<p class=\"entry-desc\">{}</p>", escape_html(&entry.description))
+    };
+
+    let module_html = entry
+        .related_module
+        .as_ref()
+        .map(|m| {
+            format!(
+                "<p class=\"entry-module\">Module: <code>import \"{0}\" | {0}::{1}(...)</code></p>",
+                escape_html(m),
+                escape_html(&entry.name)
+            )
+        })
+        .unwrap_or_default();
+
+    let examples_html = if entry.examples.is_empty() {
+        String::new()
+    } else {
+        format!("<div class=\"entry-examples\">{}</div>", render_examples_html(&entry.examples))
+    };
+
+    format!(
+        "<div class=\"entry\">\n\
+         \x20 <div class=\"entry-header\">\n\
+         \x20   <code class=\"entry-sig\">{sig}</code>\n\
+         \x20   {badges}\n\
          \x20 </div>\n\
-         \x20 <p class=\"count\"><span class=\"count-num\">{count}</span> functions</p>\n\
-         \x20 <table>\n\
-         \x20   <thead><tr><th>Function</th><th>Description</th><th>Parameters</th><th>Example</th></tr></thead>\n\
-         \x20   <tbody>\n{rows}\n\x20   </tbody>\n\
-         \x20 </table>\n\
+         {description_html}{module_html}{examples_html}\n\
          </div>"
     )
 }
 
-/// Build a selector page HTML block.
-fn build_selector_page(id: &str, selectors: &VecDeque<[String; 2]>, active: bool) -> String {
-    let rows = build_selector_table_rows(selectors);
-    let count = selectors.len();
+/// Render a module's own header doc (description + usage examples) shown above its entries.
+fn render_module_intro_html(m: &ModuleEntry) -> String {
+    if m.description.is_empty() && m.examples.is_empty() {
+        return String::new();
+    }
+
+    let desc = if m.description.is_empty() {
+        String::new()
+    } else {
+        format!("<p class=\"module-desc\">{}</p>", escape_html(&m.description))
+    };
+    let examples = if m.examples.is_empty() {
+        String::new()
+    } else {
+        format!("<div class=\"module-examples\">{}</div>", render_examples_html(&m.examples))
+    };
+
+    format!("<div class=\"module-intro\">{desc}{examples}</div>")
+}
+
+/// Build one sidebar-linked page listing every entry (a module's functions or selectors).
+fn build_entries_page(id: &str, kind_plural: &str, intro: &str, entries: &[DocEntry], active: bool) -> String {
+    let rows = entries.iter().map(render_entry_html).join("\n");
+    let count = entries.len();
     let active_class = if active { " active" } else { "" };
     format!(
         "<div class=\"module-page{active_class}\" id=\"{id}\">\n\
+         {intro}\n\
          \x20 <div class=\"search-box\">\n\
          \x20   <svg class=\"search-icon\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><circle cx=\"11\" cy=\"11\" r=\"8\"/><line x1=\"21\" y1=\"21\" x2=\"16.65\" y2=\"16.65\"/></svg>\n\
-         \x20   <input type=\"text\" class=\"search-input\" placeholder=\"Filter selectors...\" />\n\
+         \x20   <input type=\"text\" class=\"search-input\" placeholder=\"Filter {kind_plural}...\" />\n\
          \x20 </div>\n\
-         \x20 <p class=\"count\"><span class=\"count-num\">{count}</span> selectors</p>\n\
-         \x20 <table>\n\
-         \x20   <thead><tr><th>Selector</th><th>Description</th></tr></thead>\n\
-         \x20   <tbody>\n{rows}\n\x20   </tbody>\n\
-         \x20 </table>\n\
+         \x20 <p class=\"count\"><span class=\"count-num\">{count}</span> {kind_plural}</p>\n\
+         \x20 <div class=\"entries\">\n{rows}\n\x20 </div>\n\
          </div>"
     )
 }
 
 /// Format documentation as a single-page HTML with sidebar navigation.
-fn format_html(module_docs: &[ModuleDoc]) -> String {
-    let has_multiple = module_docs.len() > 1;
-    let has_selectors = module_docs.iter().any(|m| !m.selectors.is_empty());
+fn format_html(modules: &[ModuleEntry]) -> String {
+    let has_multiple = modules.len() > 1;
+    let has_selectors = modules.iter().any(|m| !m.selectors.is_empty());
 
-    // Build sidebar items for modules (functions)
     let sidebar_items = if has_multiple {
-        let all_count: usize = module_docs.iter().map(|m| m.symbols.len()).sum();
+        let all_count: usize = modules.iter().map(|m| m.functions.len()).sum();
         let all_icon = svg_icon(
             "<rect x=\"3\" y=\"3\" width=\"7\" height=\"7\"/>\
              <rect x=\"14\" y=\"3\" width=\"7\" height=\"7\"/>\
@@ -843,9 +536,9 @@ fn format_html(module_docs: &[ModuleDoc]) -> String {
              <span class=\"sidebar-label\">All</span>\
              <span class=\"sidebar-count\">{all_count}</span></a>\n"
         );
-        for (i, m) in module_docs.iter().enumerate() {
+        for (i, m) in modules.iter().enumerate() {
             let name = escape_html(&m.name);
-            let count = m.symbols.len();
+            let count = m.functions.len();
             let icon = module_icon(&m.name);
             items.push_str(&format!(
                 "<a class=\"sidebar-link\" href=\"#\" data-module=\"mod-{i}\">\
@@ -856,9 +549,9 @@ fn format_html(module_docs: &[ModuleDoc]) -> String {
         }
         items
     } else {
-        let m = &module_docs[0];
+        let m = &modules[0];
         let name = escape_html(&m.name);
-        let count = m.symbols.len();
+        let count = m.functions.len();
         let icon = module_icon(&m.name);
         format!(
             "<a class=\"sidebar-link active\" href=\"#\" data-module=\"mod-all\">\
@@ -868,10 +561,9 @@ fn format_html(module_docs: &[ModuleDoc]) -> String {
         )
     };
 
-    // Build sidebar items for selectors
     let selector_sidebar_items = if has_selectors {
         let mut items = String::new();
-        for (i, m) in module_docs.iter().enumerate() {
+        for (i, m) in modules.iter().enumerate() {
             if m.selectors.is_empty() {
                 continue;
             }
@@ -890,39 +582,30 @@ fn format_html(module_docs: &[ModuleDoc]) -> String {
         String::new()
     };
 
-    // Build function pages
     let mut pages = if has_multiple {
-        let all_symbols: VecDeque<_> = module_docs
-            .iter()
-            .flat_map(|m| m.symbols.iter())
-            .cloned()
-            .collect();
-        let mut pages_html = build_module_page("mod-all", &all_symbols, true);
-        for (i, m) in module_docs.iter().enumerate() {
+        let all_functions: Vec<DocEntry> = modules.iter().flat_map(|m| m.functions.iter().cloned()).collect();
+        let mut pages_html = build_entries_page("mod-all", "functions", "", &all_functions, true);
+        for (i, m) in modules.iter().enumerate() {
             pages_html.push('\n');
-            pages_html.push_str(&build_module_page(&format!("mod-{i}"), &m.symbols, false));
+            let intro = render_module_intro_html(m);
+            pages_html.push_str(&build_entries_page(&format!("mod-{i}"), "functions", &intro, &m.functions, false));
         }
         pages_html
     } else {
-        build_module_page("mod-all", &module_docs[0].symbols, true)
+        let intro = render_module_intro_html(&modules[0]);
+        build_entries_page("mod-all", "functions", &intro, &modules[0].functions, true)
     };
 
-    // Build selector pages
     if has_selectors {
-        for (i, m) in module_docs.iter().enumerate() {
+        for (i, m) in modules.iter().enumerate() {
             if m.selectors.is_empty() {
                 continue;
             }
             pages.push('\n');
-            pages.push_str(&build_selector_page(
-                &format!("sel-{i}"),
-                &m.selectors,
-                false,
-            ));
+            pages.push_str(&build_entries_page(&format!("sel-{i}"), "selectors", "", &m.selectors, false));
         }
     }
 
-    // Build selector sidebar section
     let selector_section = if has_selectors {
         format!(
             "        <nav class=\"sidebar-section\">\n\
@@ -949,6 +632,7 @@ fn format_html(module_docs: &[ModuleDoc]) -> String {
         --bg-primary: #2a3444;
         --bg-secondary: #232d3b;
         --bg-tertiary: #3d4a5c;
+        --bg-elevated: #313d50;
         --text-primary: #e2e8f0;
         --text-secondary: #cbd5e1;
         --text-muted: #94a3b8;
@@ -959,6 +643,9 @@ fn format_html(module_docs: &[ModuleDoc]) -> String {
         --code-bg: #1e293b;
         --code-bg-inline: #374151;
         --code-color: #e2e8f0;
+        --deprecated-color: #f87171;
+        --capability-color: #facc15;
+        --selector-color: #c491f5;
         --sidebar-width: 260px;
       }}
 
@@ -1170,38 +857,141 @@ fn format_html(module_docs: &[ModuleDoc]) -> String {
         margin-bottom: 1rem;
       }}
 
-      table {{ border-collapse: collapse; width: 100%; }}
+      /* ---- Module intro (header doc + usage examples) ---- */
+      .module-intro {{
+        border-bottom: 1px solid var(--border-default);
+        margin-bottom: 1.5rem;
+        padding-bottom: 1.25rem;
+      }}
 
-      thead th {{
-        background-color: var(--bg-tertiary);
-        border-bottom: 2px solid var(--accent-primary);
+      .module-desc {{
+        color: var(--text-secondary);
+        margin-bottom: 0.75rem;
+      }}
+
+      /* ---- Entries ---- */
+      .entries {{
+        display: flex;
+        flex-direction: column;
+        gap: 1.25rem;
+      }}
+
+      .entry {{
+        background-color: var(--bg-elevated);
+        border: 1px solid rgba(148, 163, 184, 0.18);
+        border-radius: 10px;
+        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
+        padding: 1.1rem 1.35rem;
+      }}
+
+      .entry-header {{
+        align-items: center;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+        margin-bottom: 0.5rem;
+      }}
+
+      .entry-sig {{
+        background: none;
+        color: var(--text-secondary);
+        font-family: "Consolas", "Monaco", "Courier New", monospace;
+        font-size: 0.95rem;
+        padding: 0;
+        word-break: break-word;
+      }}
+
+      .entry-name {{
         color: var(--accent-primary);
+        font-weight: 700;
+      }}
+
+      .badge {{
+        border-radius: 10px;
+        font-size: 0.68rem;
+        font-weight: 600;
+        letter-spacing: 0.3px;
+        padding: 0.15rem 0.55rem;
+        text-transform: uppercase;
+        white-space: nowrap;
+      }}
+
+      .badge-kind-function {{
+        background-color: rgba(103, 184, 227, 0.15);
+        color: var(--accent-primary);
+      }}
+
+      .badge-kind-selector {{
+        background-color: rgba(196, 145, 245, 0.15);
+        color: var(--selector-color);
+      }}
+
+      .badge-deprecated {{
+        background-color: rgba(248, 113, 113, 0.15);
+        color: var(--deprecated-color);
+      }}
+
+      .badge-capability {{
+        background-color: rgba(250, 204, 21, 0.15);
+        color: var(--capability-color);
+        cursor: help;
+      }}
+
+      .entry-desc {{
+        color: var(--text-secondary);
+        font-size: 0.9rem;
+        margin-bottom: 0.4rem;
+      }}
+
+      .entry-module {{
+        color: var(--text-muted);
         font-size: 0.8rem;
+        margin-bottom: 0.5rem;
+      }}
+
+      .entry-module code {{
+        background: none;
+        padding: 0;
+      }}
+
+      .module-examples, .entry-examples {{
+        display: flex;
+        flex-direction: column;
+        gap: 0.5rem;
+        margin-top: 0.5rem;
+      }}
+
+      .example {{
+        display: flex;
+        flex-direction: column;
+        gap: 0.4rem;
+      }}
+
+      .example-label {{
+        color: var(--text-muted);
+        font-size: 0.68rem;
         font-weight: 600;
         letter-spacing: 0.5px;
-        padding: 0.75rem 1rem;
-        position: sticky;
-        text-align: left;
         text-transform: uppercase;
-        top: 0;
-        z-index: 5;
       }}
 
-      tbody tr {{
-        border-bottom: 1px solid var(--border-muted);
-        cursor: pointer;
-        transition: background-color 0.15s;
+      .example-code, .example-result {{
+        border-radius: 6px;
+        font-family: "Consolas", "Monaco", "Courier New", monospace;
+        font-size: 0.82rem;
+        margin: 0;
+        max-width: 70ch;
+        overflow-x: auto;
+        padding: 0.55rem 0.75rem;
+        white-space: pre-wrap;
+        word-break: break-word;
       }}
 
-      tbody tr:hover {{ background-color: var(--bg-tertiary); }}
-
-      tbody td {{
-        font-size: 0.9rem;
-        padding: 0.65rem 1rem;
-        vertical-align: top;
+      .example-code {{ background-color: var(--code-bg); }}
+      .example-result {{
+        background-color: var(--bg-tertiary);
+        color: var(--text-secondary);
       }}
-
-      tbody td:first-child {{ white-space: nowrap; }}
 
       code {{
         background-color: var(--code-bg-inline);
@@ -1211,8 +1001,6 @@ fn format_html(module_docs: &[ModuleDoc]) -> String {
         font-size: 0.85em;
         padding: 0.15em 0.4em;
       }}
-
-      del code {{ opacity: 0.6; }}
 
       footer {{
         border-top: 1px solid var(--border-default);
@@ -1265,12 +1053,7 @@ fn format_html(module_docs: &[ModuleDoc]) -> String {
           padding: 1.5rem 1rem;
         }}
 
-        table {{ display: block; overflow-x: auto; }}
-
-        tbody td, thead th {{
-          font-size: 0.8rem;
-          padding: 0.6rem 0.75rem;
-        }}
+        .entry-sig {{ font-size: 0.8rem; }}
       }}
     </style>
   </head>
@@ -1330,12 +1113,11 @@ fn format_html(module_docs: &[ModuleDoc]) -> String {
         input.addEventListener("input", function () {{
           var page = input.closest(".module-page");
           var q = input.value.toLowerCase();
-          var rows = page.querySelectorAll("tbody tr");
+          var entries = page.querySelectorAll(".entry");
           var visible = 0;
-          rows.forEach(function (row) {{
-            var text = row.textContent.toLowerCase();
-            var show = text.includes(q);
-            row.style.display = show ? "" : "none";
+          entries.forEach(function (entry) {{
+            var show = entry.textContent.toLowerCase().includes(q);
+            entry.style.display = show ? "" : "none";
             if (show) visible++;
           }});
           page.querySelector(".count-num").textContent = visible;
@@ -1399,8 +1181,5 @@ fn selector_icon() -> String {
 
 /// Escape HTML special characters.
 fn escape_html(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }

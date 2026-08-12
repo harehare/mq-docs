@@ -6,10 +6,11 @@ A documentation generator for [mq](https://github.com/harehare/mq) functions, ma
 
 ## Features
 
-- Generates documentation for functions, macros, and selectors
+- Generates documentation for functions, macros, and selectors, backed by [`mq-help`](https://crates.io/crates/mq-help)'s unified catalog — the same one `mq help` uses
+- Every function/selector shows its real, CI-verified examples (input query + actual output), return type, required capability (e.g. `file-io`, `http`), and originating module
 - Multiple output formats: Markdown, plain text, HTML, and JSON
-- HTML output includes interactive sidebar navigation, search/filter, and responsive design
-- Supports built-in modules, custom files, and loadable modules (e.g., `csv`, `json`)
+- HTML output includes interactive sidebar navigation, search/filter, per-entry example blocks, capability/deprecation badges, and responsive design
+- Supports built-in modules, custom `.mq` files (with real doc-comment-derived examples), and loadable modules (e.g., `csv`, `json`)
 - Available as both a CLI tool and a library
 
 ## Installation
@@ -89,7 +90,7 @@ use mq_docs::{generate_docs, DocFormat};
 
 fn main() -> miette::Result<()> {
     // Generate Markdown documentation for built-in functions
-    let docs = generate_docs(&None, &None, &DocFormat::Markdown, false)?;
+    let docs = generate_docs(&None, &None, &DocFormat::Markdown, false, None)?;
     println!("{docs}");
     Ok(())
 }
@@ -97,10 +98,10 @@ fn main() -> miette::Result<()> {
 
 ## Output Formats
 
-- **Markdown** - Tables suitable for rendering in documentation sites or GitHub
-- **Text** - Plain text output for terminal viewing
-- **HTML** - Self-contained single-page HTML with dark theme, sidebar navigation, search filtering, and mobile support
-- **JSON** - Array of modules, each with structured function and selector records (name, description, parameters, example), for tool-calling schema generators, editor autocomplete, or search indexes
+- **Markdown** - One section per module/entry with description and fenced-code examples (input + verified output), suitable for documentation sites or GitHub
+- **Text** - Plain text output for terminal viewing, one block per entry with signature, description, and examples
+- **HTML** - Self-contained single-page HTML with dark theme, sidebar navigation, search filtering, per-entry example blocks, capability/deprecation badges, and mobile support
+- **JSON** - Array of modules, each with its own description/examples plus structured function and selector records (name, kind, params with types, return type, verified examples, capability, related module, deprecation flag), for tool-calling schema generators, editor autocomplete, or search indexes
 
 ## License
 
