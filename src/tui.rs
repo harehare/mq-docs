@@ -14,7 +14,7 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Tabs, Wrap},
 };
 
-use mq_docs::{DocEntry, ModuleEntry, SelectorEntry};
+use mq_docs::{DocEntry, ModuleEntry, is_deprecated};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ContentTab {
@@ -39,7 +39,7 @@ struct App {
     module_names: Vec<String>,
     // parallel vecs of functions/selectors per module (index 0 = All combined)
     module_functions: Vec<Vec<DocEntry>>,
-    module_selectors: Vec<Vec<SelectorEntry>>,
+    module_selectors: Vec<Vec<DocEntry>>,
 
     selected_module: usize,
     module_list_state: ListState,
@@ -67,7 +67,7 @@ impl App {
             .iter()
             .flat_map(|m| m.functions.iter().cloned())
             .collect();
-        let all_sels: Vec<SelectorEntry> = modules
+        let all_sels: Vec<DocEntry> = modules
             .iter()
             .flat_map(|m| m.selectors.iter().cloned())
             .collect();
@@ -123,7 +123,7 @@ impl App {
         &self.module_functions[self.selected_module]
     }
 
-    fn current_sels(&self) -> &Vec<SelectorEntry> {
+    fn current_sels(&self) -> &Vec<DocEntry> {
         &self.module_selectors[self.selected_module]
     }
 
@@ -213,7 +213,7 @@ impl App {
         self.current_fns().get(*real)
     }
 
-    fn current_sel_entry(&self) -> Option<&SelectorEntry> {
+    fn current_sel_entry(&self) -> Option<&DocEntry> {
         let idx = self.item_list_state.selected()?;
         let real = self.filtered_sel.get(idx)?;
         self.current_sels().get(*real)
@@ -450,7 +450,7 @@ fn draw_item_list(f: &mut Frame, app: &App, area: Rect) {
                 .iter()
                 .map(|&i| {
                     let e = &app.current_fns()[i];
-                    if e.is_deprecated {
+                    if is_deprecated(e) {
                         ListItem::new(Line::from(Span::styled(
                             e.name.as_str(),
                             Style::default()
@@ -501,111 +501,90 @@ fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
         .title(" Detail ")
         .border_style(Style::default().fg(Color::DarkGray));
 
-    match app.content_tab {
-        ContentTab::Functions => {
-            if let Some(e) = app.current_fn_entry() {
-                let mut lines: Vec<Line> = vec![
-                    Line::from(vec![
-                        Span::styled(
-                            "Function:    ",
-                            Style::default()
-                                .fg(Color::Cyan)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(
-                            e.name.as_str(),
-                            Style::default()
-                                .fg(Color::Yellow)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                    ]),
-                ];
-                if e.is_deprecated {
-                    lines.push(Line::from(Span::styled(
-                        "             ⚠ Deprecated",
-                        Style::default()
-                            .fg(Color::DarkGray)
-                            .add_modifier(Modifier::DIM),
-                    )));
-                }
-                lines.push(Line::from(""));
-                lines.push(Line::from(Span::styled(
-                    "Description",
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                )));
-                if e.description.is_empty() {
-                    lines.push(Line::from("  —"));
-                } else {
-                    for l in e.description.lines() {
-                        lines.push(Line::from(format!("  {l}")));
-                    }
-                }
-                lines.push(Line::from(""));
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        "Parameters:  ",
-                        Style::default()
-                            .fg(Color::Cyan)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::raw(if e.params.is_empty() { "—" } else { &e.params }),
-                ]));
-                lines.push(Line::from(""));
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        "Example:     ",
-                        Style::default()
-                            .fg(Color::Cyan)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(e.example.as_str(), Style::default().fg(Color::Green)),
-                ]));
-                f.render_widget(
-                    Paragraph::new(lines).block(block).wrap(Wrap { trim: false }),
-                    area,
-                );
-            } else {
-                f.render_widget(Paragraph::new("No entry selected.").block(block), area);
-            }
+    let entry = match app.content_tab {
+        ContentTab::Functions => app.current_fn_entry(),
+        ContentTab::Selectors => app.current_sel_entry(),
+    };
+
+    match entry {
+        Some(e) => {
+            let label = if e.kind == "selector" { "Selector:    " } else { "Function:    " };
+            f.render_widget(
+                Paragraph::new(entry_detail_lines(e, label))
+                    .block(block)
+                    .wrap(Wrap { trim: false }),
+                area,
+            );
         }
-        ContentTab::Selectors => {
-            if let Some(e) = app.current_sel_entry() {
-                let lines: Vec<Line> = vec![
-                    Line::from(vec![
-                        Span::styled(
-                            "Selector:    ",
-                            Style::default()
-                                .fg(Color::Cyan)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(
-                            e.name.as_str(),
-                            Style::default()
-                                .fg(Color::Yellow)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                    ]),
-                    Line::from(""),
-                    Line::from(Span::styled(
-                        "Description",
-                        Style::default()
-                            .fg(Color::Cyan)
-                            .add_modifier(Modifier::BOLD),
-                    )),
-                    Line::from(format!(
-                        "  {}",
-                        if e.description.is_empty() { "—" } else { &e.description }
-                    )),
-                ];
-                f.render_widget(
-                    Paragraph::new(lines).block(block).wrap(Wrap { trim: false }),
-                    area,
-                );
-            } else {
-                f.render_widget(Paragraph::new("No entry selected.").block(block), area);
+        None => f.render_widget(Paragraph::new("No entry selected.").block(block), area),
+    }
+}
+
+fn entry_detail_lines<'a>(e: &'a DocEntry, name_label: &'static str) -> Vec<Line<'a>> {
+    let label_style = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+
+    let mut lines: Vec<Line> = vec![Line::from(vec![
+        Span::styled(name_label, label_style),
+        Span::styled(e.name.as_str(), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+    ])];
+
+    if is_deprecated(e) {
+        lines.push(Line::from(Span::styled(
+            "             ⚠ Deprecated",
+            Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM),
+        )));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled("Description", label_style)));
+    if e.description.is_empty() {
+        lines.push(Line::from("  —"));
+    } else {
+        for l in e.description.lines() {
+            lines.push(Line::from(format!("  {l}")));
+        }
+    }
+
+    lines.push(Line::from(""));
+    let params = e.params.iter().map(|p| format!("{}: {}", p.name, p.type_name)).collect::<Vec<_>>().join(", ");
+    lines.push(Line::from(vec![
+        Span::styled("Parameters:  ", label_style),
+        Span::raw(if params.is_empty() { "—".to_string() } else { params }),
+    ]));
+    lines.push(Line::from(vec![Span::styled("Returns:     ", label_style), Span::raw(e.returns.as_str())]));
+
+    if let Some(module) = &e.related_module {
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled("Module:      ", label_style),
+            Span::raw(format!("import \"{module}\" | {module}::{}(...)", e.name)),
+        ]));
+    }
+
+    if let Some(capability) = &e.capability {
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled("Capability:  ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::raw(format!("requires `{capability}` (not available via the hosted Web API/playground)")),
+        ]));
+    }
+
+    if !e.examples.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled("Examples", label_style)));
+        for example in &e.examples {
+            for l in example.code.lines() {
+                lines.push(Line::from(Span::styled(format!("  {l}"), Style::default().fg(Color::Green))));
+            }
+            for (i, l) in example.expected.lines().enumerate() {
+                let prefix = if i == 0 { "  #=> " } else { "      " };
+                lines.push(Line::from(Span::styled(
+                    format!("{prefix}{l}"),
+                    Style::default().fg(Color::DarkGray),
+                )));
             }
         }
     }
+
+    lines
 }
