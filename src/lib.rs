@@ -209,7 +209,6 @@ fn generic_module(module_name: &str) -> Result<ModuleEntry, miette::Error> {
 
             match &symbol {
                 mq_hir::Symbol { kind: mq_hir::SymbolKind::Function(params), value: Some(value), doc, .. }
-                | mq_hir::Symbol { kind: mq_hir::SymbolKind::Macro(params), value: Some(value), doc, .. }
                     if !symbol.is_internal_function() =>
                 {
                     Some(DocEntry {
