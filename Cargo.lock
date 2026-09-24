@@ -1534,7 +1534,7 @@ dependencies = [
 
 [[package]]
 name = "mq-docs"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "clap",
  "crossterm",
@@ -1550,9 +1550,9 @@ dependencies = [
 
 [[package]]
 name = "mq-help"
-version = "0.9.0"
+version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6f4067f037753d52ff9b6aca9c922c71d8c109e9bca7d8464cbb01d2e3ed105f"
+checksum = "077afb8ba1df1f12d61b62d159f01c395f022fada2d9b68b87970eb1c4f35c56"
 dependencies = [
  "colored",
  "mq-lang",
@@ -1561,9 +1561,9 @@ dependencies = [
 
 [[package]]
 name = "mq-hir"
-version = "0.9.0"
+version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "40c1fd307e3d944b33a12178562e14e7275be0c0048b31390177a58e8b404b15"
+checksum = "79f9f89e88ee357d9c509f612faf3e1aa7fb40c42f1996d394cfef4c6d64018d"
 dependencies = [
  "itertools 0.15.0",
  "mq-lang",
@@ -1576,9 +1576,9 @@ dependencies = [
 
 [[package]]
 name = "mq-lang"
-version = "0.9.0"
+version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "83af2c040a49fad25ca6158e63c3ad769998af355cc50df5dc465af17f690eae"
+checksum = "0d5c80545fbe7aa75f48efe878f761f93e232e9f83f3d4ca386993b73e7f2791"
 dependencies = [
  "ammonia",
  "base64 0.23.1",
@@ -1624,15 +1624,14 @@ dependencies = [
  "url",
  "uuid",
  "web-sys",
- "web-time",
  "yaml-rust2",
 ]
 
 [[package]]
 name = "mq-macros"
-version = "0.9.0"
+version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "539dc8924e977ff8b00d7dbbdd62dcb06d23d8b975af1a7c30e5ffe8b3b4d8e5"
+checksum = "171424719b2d0768d6f74c66b1905b90132e59f5dceb40cde1d1a9b1a0e7ec5f"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1641,9 +1640,9 @@ dependencies = [
 
 [[package]]
 name = "mq-markdown"
-version = "0.9.0"
+version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e8d90b4f7838e1ea5e38799c3cdf3fa7f7bfe0110fdcdf44d6b235ef146ab161"
+checksum = "03640aecdcae53f940ebaf9ad53774b4d975749c1ec2d54d32ce7235791d1829"
 dependencies = [
  "ego-tree",
  "itertools 0.15.0",
@@ -3198,16 +3197,6 @@ name = "web-sys"
 version = "0.3.102"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a6430a72df5eb332242960fe84b3002a241163998241eb596d4f739b9757061d"
-dependencies = [
- "js-sys",
- "wasm-bindgen",
-]
-
-[[package]]
-name = "web-time"
-version = "1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5a6580f308b1fad9207618087a65c04e7a10bc77e02c8e84e9b00dd4b12fa0bb"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
