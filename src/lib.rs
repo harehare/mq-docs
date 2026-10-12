@@ -223,6 +223,7 @@ fn generic_module(module_name: &str) -> Result<ModuleEntry, miette::Error> {
                         examples: Vec::new(),
                         capability: None,
                         related_module: Some(module_name.to_string()),
+                        aliases: Vec::new(),
                     })
                 }
                 _ => None,
@@ -249,6 +250,7 @@ fn from_mq_fn_doc(f: mq_help::MqFnDoc, related_module: Option<String>) -> DocEnt
         examples: f.examples.into_iter().map(|e| DocExample { code: e.code, expected: e.expected }).collect(),
         capability: None,
         related_module,
+        aliases: Vec::new(),
     }
 }
 
