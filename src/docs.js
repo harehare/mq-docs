@@ -532,26 +532,6 @@
 
   // ---- Misc ----
 
-  function copyText(text) {
-    if (navigator.clipboard && window.isSecureContext) {
-      return navigator.clipboard.writeText(text);
-    }
-    return new Promise(function (resolve, reject) {
-      var area = document.createElement("textarea");
-      area.value = text;
-      area.style.position = "fixed";
-      area.style.opacity = "0";
-      document.body.appendChild(area);
-      area.select();
-      try {
-        document.execCommand("copy") ? resolve() : reject(new Error("copy failed"));
-      } catch (e) {
-        reject(e);
-      }
-      document.body.removeChild(area);
-    });
-  }
-
   function closeSidebar() {
     sidebar.classList.remove("open");
     overlay.classList.remove("open");
@@ -584,15 +564,6 @@
     } else if (link.classList.contains("entry-anchor")) {
       e.preventDefault();
       go(link.getAttribute("href"));
-      copyText(location.href).then(
-        function () {
-          link.classList.add("copied");
-          setTimeout(function () {
-            link.classList.remove("copied");
-          }, 1200);
-        },
-        function () {}
-      );
     } else if (link.closest(".az-nav, .sidebar-sub")) {
       e.preventDefault();
       var first = firstVisible(activePage(), link.getAttribute("data-group"));
