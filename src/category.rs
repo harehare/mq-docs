@@ -18,11 +18,6 @@ const CATEGORIES: &[(&str, &[&str])] = &[
             "to_image", "to_link", "to_markdown", "to_markdown_string", "to_math", "to_math_inline",
             "to_md_fragment", "to_md_html", "to_md_list", "to_md_name", "to_md_table_align",
             "to_md_table_cell", "to_md_table_row", "to_md_text", "to_mdx", "to_strong", "to_text",
-        ],
-    ),
-    (
-        "Markdown Checks",
-        &[
             "is_callout", "is_code", "is_em", "is_h", "is_h1", "is_h2", "is_h3", "is_h4", "is_h5",
             "is_h6", "is_h_level", "is_html", "is_list", "is_mdx", "is_mdx_flow_expression",
             "is_mdx_js_esm", "is_mdx_jsx_flow_element", "is_mdx_jsx_text_element",
@@ -44,7 +39,7 @@ const CATEGORIES: &[(&str, &[&str])] = &[
         ],
     ),
     (
-        "Array & Collection",
+        "Collections",
         &[
             "all", "any", "chunk_by", "chunks", "collect", "combinations", "compact", "compact_map",
             "difference", "each", "fill", "filter", "find", "find_index", "first", "flat_map",
@@ -54,11 +49,6 @@ const CATEGORIES: &[(&str, &[&str])] = &[
             "select", "skip", "skip_while", "sort", "sort_by", "sort_natural", "split_records", "take",
             "take_while", "tally", "token_compress", "transpose", "union", "uniq", "unique_by", "unzip",
             "zip",
-        ],
-    ),
-    (
-        "Dict & Path",
-        &[
             "del", "del_path", "del_paths", "entries", "from_entries", "frontmatter", "get", "get_or",
             "get_path", "has", "index_by", "insert", "invert", "keys", "leaf_entries", "map_values",
             "merge_defaults", "merge_with", "omit", "paths", "pick", "pluck", "set", "set_path",
@@ -79,23 +69,13 @@ const CATEGORIES: &[(&str, &[&str])] = &[
         ],
     ),
     (
-        "Comparison & Logic",
+        "Types & Logic",
         &[
             "and", "between", "coalesce", "complement", "eq", "gt", "gte", "identity", "in", "lt",
             "lte", "ne", "not", "or",
-        ],
-    ),
-    (
-        "Type Checks",
-        &[
             "arrays", "booleans", "bytes", "dicts", "is_array", "is_blank", "is_bool", "is_bytes",
             "is_coroutine", "is_dict", "is_empty", "is_markdown", "is_none", "is_number", "is_string",
             "iterables", "markdowns", "nones", "numbers", "scalars", "strings", "type",
-        ],
-    ),
-    (
-        "Conversion",
-        &[
             "array", "convert", "dict", "to_array", "to_boolean", "to_bytes", "to_coroutine",
             "to_number", "to_number_or", "to_string",
         ],
@@ -108,15 +88,10 @@ const CATEGORIES: &[(&str, &[&str])] = &[
         ],
     ),
     (
-        "Regex & Matching",
+        "Regex & Encoding",
         &[
             "capture", "glob_match", "gsub", "is_not_regex_match", "is_regex_match", "redact",
             "regex_escape", "regex_match", "regex_replace", "replace_prose", "scan", "test",
-        ],
-    ),
-    (
-        "Encoding & Hashing",
-        &[
             "base64", "base64d", "base64d_bytes", "base64url", "base64urld", "base64urld_bytes",
             "decode", "encode", "from_hex", "hexdump", "html_escape", "html_unescape",
             "markdown_escape", "md5", "pack", "sha256", "sha512", "shell_quote", "to_hex", "unpack",
@@ -124,14 +99,9 @@ const CATEGORIES: &[(&str, &[&str])] = &[
         ],
     ),
     (
-        "Paths & Files",
+        "Files & I/O",
         &[
             "basename", "dirname", "extname", "path_join", "safe_filename", "stem",
-        ],
-    ),
-    (
-        "I/O & Network",
-        &[
             "close", "collection", "env", "file_exists", "file_info", "file_size", "http", "http_all",
             "http_delete", "http_delete_json", "http_get", "http_get_json", "http_head", "http_lines",
             "http_patch", "http_patch_json", "http_post", "http_post_json", "http_put", "http_put_json",
@@ -141,20 +111,10 @@ const CATEGORIES: &[(&str, &[&str])] = &[
         ],
     ),
     (
-        "Random & IDs",
+        "Utilities",
         &[
             "random_string", "sample", "shuffle", "uuid", "uuid_v4", "uuid_v7",
-        ],
-    ),
-    (
-        "Functional",
-        &[
             "comp", "flip", "juxt", "partial", "tap",
-        ],
-    ),
-    (
-        "Debug & Errors",
-        &[
             "all_symbols", "breakpoint", "debug", "error", "halt", "halt_error", "inspect", "intern",
         ],
     ),
@@ -178,9 +138,8 @@ pub const fn builtin_category_count() -> usize {
 /// Prefix rules for names added to mq after this table was written.
 fn fallback(name: &str) -> Option<usize> {
     let title = match name {
-        _ if name.starts_with("is_") => "Type Checks",
-        _ if name.starts_with("to_") => "Conversion",
-        _ if name.starts_with("http_") || name.starts_with("read_") => "I/O & Network",
+        _ if name.starts_with("is_") || name.starts_with("to_") => "Types & Logic",
+        _ if name.starts_with("http_") || name.starts_with("read_") => "Files & I/O",
         _ => return None,
     };
     CATEGORIES.iter().position(|(t, _)| *t == title)
@@ -199,7 +158,7 @@ mod tests {
     #[test]
     fn unknown_names_use_prefix_rules_then_other() {
         assert_eq!(builtin_category("abs").1, "Math & Statistics");
-        assert_eq!(builtin_category("is_something_new").1, "Type Checks");
+        assert_eq!(builtin_category("is_something_new").1, "Types & Logic");
         assert_eq!(builtin_category("frobnicate"), (CATEGORIES.len(), "Other"));
     }
 }

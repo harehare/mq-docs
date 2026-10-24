@@ -9,7 +9,7 @@ A documentation generator for [mq](https://github.com/harehare/mq) functions, ma
 - Generates documentation for functions, macros, and selectors, backed by [`mq-help`](https://crates.io/crates/mq-help)'s unified catalog — the same one `mq help` uses
 - Every function/selector shows its real, CI-verified examples (input query + actual output), return type, required capability (e.g. `file-io`, `http`), and originating module
 - Multiple output formats: Markdown, plain text, HTML, and JSON
-- HTML output includes sidebar navigation with deep links (`#csv::csv_parse`), cross-module search (`/` or Ctrl+K, kept in `?q=`), category/A–Z jump bar, syntax-highlighted example blocks, function cross-links, capability/deprecation badges, and responsive design
+- HTML output includes sidebar navigation with deep links (`#csv::csv_parse`), cross-module search (`/` or Ctrl+K, kept in `?q=`), categories nested under the sidebar entry (A–Z jump bar on other pages), syntax-highlighted example blocks, function cross-links, capability/deprecation badges, and responsive design
 - Supports built-in modules, custom `.mq` files (with real doc-comment-derived examples), and loadable modules (e.g., `csv`, `json`)
 - Available as both a CLI tool and a library
 

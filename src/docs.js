@@ -72,6 +72,30 @@
     };
   });
 
+  // Grouped pages list their categories under their sidebar link instead of in a bar above the
+  // entries; the sidebar shows them only while that link is the active one.
+  pages.forEach(function (page) {
+    var groups = $$(".entry-group:not(.entry-group-module)", page);
+    var link = links.find(function (l) {
+      return l.getAttribute("data-module") === page.id;
+    });
+    if (!groups.length || !link) return;
+    var sub = document.createElement("div");
+    sub.className = "sidebar-sub";
+    sub.setAttribute("aria-label", "Categories");
+    groups.forEach(function (group) {
+      var title = $(".group-title", group).firstChild.textContent;
+      var a = document.createElement("a");
+      a.className = "sidebar-sub-link";
+      a.href = "#";
+      a.setAttribute("data-group", title);
+      a.textContent = title;
+      sub.appendChild(a);
+    });
+    link.parentNode.insertBefore(sub, link.nextSibling);
+    page._subnav = sub;
+  });
+
   var query = "";
   var results = [];
   var selected = -1;
@@ -463,7 +487,7 @@
     });
   });
 
-  // ---- Jump bar: A–Z letters, or categories on grouped pages ----
+  // ---- Jump bar: A–Z letters, or categories in the sidebar on grouped pages ----
 
   function firstVisible(page, group) {
     return $('.entry[data-group="' + CSS.escape(group) + '"]:not([hidden])', page);
@@ -471,13 +495,14 @@
 
   // The element a jump link scrolls to: the category heading, or the first card of the letter.
   function jumpTarget(first) {
-    return first.closest(".entry-group") || first;
+    var group = first.closest(".entry-group");
+    return group ? $(".group-title", group) : first;
   }
 
   // Dim groups with no visible entry, highlight the one being read.
   function updateJumpBar() {
     var page = activePage();
-    var nav = page && $(".az-nav", page);
+    var nav = page && ($(".az-nav", page) || page._subnav);
     if (!nav) return;
 
     // The toolbar is sticky and its height changes when the bar wraps; scroll-margin follows it.
@@ -568,10 +593,11 @@
         },
         function () {}
       );
-    } else if (link.closest(".az-nav")) {
+    } else if (link.closest(".az-nav, .sidebar-sub")) {
       e.preventDefault();
       var first = firstVisible(activePage(), link.getAttribute("data-group"));
       if (first) jumpTarget(first).scrollIntoView({ block: "start" });
+      if (link.closest(".sidebar-sub")) closeSidebar();
     }
   });
 
