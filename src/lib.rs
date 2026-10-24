@@ -1,8 +1,13 @@
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 
 use itertools::Itertools;
 use miette::miette;
 use serde::Serialize;
+
+mod category;
+
+use category::{builtin_category, builtin_category_count};
 
 pub use mq_help::{HelpEntry as DocEntry, HelpExample as DocExample, HelpParam as DocParam};
 
@@ -325,12 +330,14 @@ fn format_text(modules: &[ModuleEntry]) -> String {
 
 fn render_entry_text(e: &DocEntry) -> String {
     let mut out = String::new();
-    let params = e.params.iter().map(|p| format!("{}: {}", p.name, p.type_name)).join(", ");
     let deprecated = if is_deprecated(e) { " [deprecated]" } else { "" };
 
-    let _ = writeln!(out, "{}({}): {}{}", e.name, params, e.returns, deprecated);
+    let _ = writeln!(out, "{}{deprecated}", signature_text(e));
     if !e.description.is_empty() {
         let _ = writeln!(out, "  {}", e.description);
+    }
+    if !e.aliases.is_empty() {
+        let _ = writeln!(out, "  Aliases: {}", e.aliases.join(", "));
     }
     if let Some(module) = &e.related_module {
         let _ = writeln!(out, "  Module: import \"{module}\" | {module}::{}(...)", e.name);
@@ -386,56 +393,468 @@ fn format_json(modules: &[ModuleEntry]) -> Result<String, miette::Error> {
     serde_json::to_string_pretty(&json_modules).map_err(|e| miette!("{e}"))
 }
 
+/// Lowercase, hyphen-separated form of `s` used inside page ids and permalinks.
+fn slugify(s: &str) -> String {
+    s.to_lowercase().split(|c: char| !c.is_alphanumeric()).filter(|part| !part.is_empty()).join("-")
+}
+
+/// Reserve `base` in `used`, appending `-2`, `-3`, ... when it is already taken.
+fn unique_id(base: String, used: &mut HashSet<String>) -> String {
+    if used.insert(base.clone()) {
+        return base;
+    }
+    (2..)
+        .map(|n| format!("{base}-{n}"))
+        .find(|candidate| used.insert(candidate.clone()))
+        .expect("an unbounded range always yields a free id")
+}
+
+/// Percent-encode a permalink so it survives as a URL fragment (`<`, `[`, `$`, ... in selector names).
+fn href_fragment(anchor: &str) -> String {
+    let mut out = String::from("#");
+    for b in anchor.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~' | b':') {
+            out.push(b as char);
+        } else {
+            let _ = write!(out, "%{b:02X}");
+        }
+    }
+    out
+}
+
+/// Sort key that ignores leading punctuation, so `.h1` sits next to `h1` rather than before `a`.
+fn entry_sort_key(name: &str) -> String {
+    name.trim_start_matches(|c: char| !c.is_alphanumeric()).to_lowercase()
+}
+
+/// Jump-bar bucket of an entry: its first letter, or `*` for digits and symbols.
+fn entry_letter(name: &str) -> char {
+    name.chars().find(|c| c.is_alphanumeric()).filter(char::is_ascii_alphabetic).map_or('*', |c| c.to_ascii_uppercase())
+}
+
+/// An entry together with its permalink, as laid out on the HTML page.
+struct HtmlItem<'a> {
+    entry: &'a DocEntry,
+    anchor: String,
+    module: usize,
+    module_name: &'a str,
+    /// Whether the entry belongs to the native built-ins group.
+    builtin: bool,
+    /// Heading the entry is filed under on a grouped page, and that heading's display order.
+    group: String,
+    rank: usize,
+}
+
+/// Page ids and permalinks for one module.
+struct ModuleLayout<'a> {
+    page_id: String,
+    selector_page_id: String,
+    functions: Vec<HtmlItem<'a>>,
+    selectors: Vec<HtmlItem<'a>>,
+}
+
+/// Sort `entries` and give each a permalink that is unique across the whole page. Built-in
+/// functions are filed under their category; other modules' functions under the module name.
+fn layout_entries<'a>(
+    module: &'a ModuleEntry,
+    idx: usize,
+    entries: &'a [DocEntry],
+    prefix: Option<&str>,
+    used: &mut HashSet<String>,
+) -> Vec<HtmlItem<'a>> {
+    let builtin = is_builtin_name(&module.name);
+    let mut sorted: Vec<&DocEntry> = entries.iter().collect();
+    sorted.sort_by_cached_key(|e| (entry_sort_key(&e.name), e.name.clone()));
+    sorted
+        .into_iter()
+        .map(|entry| {
+            let base = prefix.map_or_else(|| entry.name.clone(), |p| format!("{p}::{}", entry.name));
+            let (rank, group) = match (builtin, entry.kind) {
+                (true, "function") => {
+                    let (rank, title) = builtin_category(&entry.name);
+                    (rank, title.to_string())
+                }
+                _ => (builtin_category_count() + idx, module.name.clone()),
+            };
+            HtmlItem {
+                entry,
+                anchor: unique_id(base, used),
+                module: idx,
+                module_name: &module.name,
+                builtin,
+                group,
+                rank,
+            }
+        })
+        .collect()
+}
+
+/// Assign page ids and unique permalinks to every module and entry. Built-in entries are
+/// addressed as `#abs`, everything else as `#csv::csv_parse`.
+fn layout_modules(modules: &[ModuleEntry]) -> Vec<ModuleLayout<'_>> {
+    let mut used: HashSet<String> = HashSet::from(["mod-all".to_string(), "search-results".to_string()]);
+    let page_ids: Vec<(String, String)> = modules
+        .iter()
+        .map(|m| {
+            let slug = slugify(&m.name);
+            (unique_id(format!("mod-{slug}"), &mut used), unique_id(format!("sel-{slug}"), &mut used))
+        })
+        .collect();
+
+    let mut layouts = Vec::new();
+    for (i, (m, (page_id, selector_page_id))) in modules.iter().zip(page_ids).enumerate() {
+        let prefix = (!is_builtin_name(&m.name)).then(|| slugify(&m.name));
+        layouts.push(ModuleLayout {
+            page_id,
+            selector_page_id,
+            functions: layout_entries(m, i, &m.functions, prefix.as_deref(), &mut used),
+            selectors: layout_entries(m, i, &m.selectors, prefix.as_deref(), &mut used),
+        });
+    }
+    layouts
+}
+
+/// Where a function name can be linked to.
+struct LinkTarget {
+    module: usize,
+    builtin: bool,
+    anchor: String,
+}
+
+/// Name → permalink lookup used to cross-link function names in descriptions and examples.
+struct LinkIndex {
+    by_name: HashMap<String, Vec<LinkTarget>>,
+    anchors: HashSet<String>,
+}
+
+impl LinkIndex {
+    fn new(modules: &[ModuleEntry], layouts: &[ModuleLayout<'_>]) -> Self {
+        let mut index = LinkIndex { by_name: HashMap::new(), anchors: HashSet::new() };
+        for (m, layout) in modules.iter().zip(layouts) {
+            let builtin = is_builtin_name(&m.name);
+            for item in layout.functions.iter().chain(&layout.selectors) {
+                index.anchors.insert(item.anchor.clone());
+                let names = std::iter::once(&item.entry.name).chain(&item.entry.aliases);
+                for name in names {
+                    index.by_name.entry(name.clone()).or_default().push(LinkTarget {
+                        module: item.module,
+                        builtin,
+                        anchor: item.anchor.clone(),
+                    });
+                }
+            }
+        }
+        index
+    }
+
+    /// Resolve a bare name seen in module `from`: its own module wins, then the built-ins.
+    /// Other modules are only reachable through `module::name`, since a bare `` `text` ``
+    /// usually names a node type or argument rather than that module's function.
+    fn resolve(&self, name: &str, from: usize) -> Option<&str> {
+        let candidates = self.by_name.get(name)?;
+        candidates
+            .iter()
+            .find(|t| t.module == from)
+            .or_else(|| candidates.iter().find(|t| t.builtin))
+            .map(|t| t.anchor.as_str())
+    }
+}
+
+/// Everything needed to cross-link names inside one entry's text.
+struct LinkCtx<'a> {
+    index: &'a LinkIndex,
+    module: usize,
+    self_anchor: &'a str,
+    params: &'a [DocParam],
+}
+
+impl LinkCtx<'_> {
+    /// Permalink for `name`, unless it is the entry itself or one of its own parameters
+    /// (`` `path` `` in a description usually means the argument, not a function of that name).
+    fn target(&self, name: &str) -> Option<&str> {
+        if self.params.iter().any(|p| p.name == name) {
+            return None;
+        }
+        let anchor = if name.contains("::") {
+            self.index.anchors.get(name).map(String::as_str)
+        } else {
+            self.index.resolve(name, self.module)
+        };
+        anchor.filter(|a| *a != self.self_anchor)
+    }
+
+    fn link(&self, anchor: &str, inner: &str) -> String {
+        format!("<a class=\"xref\" href=\"{}\">{inner}</a>", href_fragment(anchor))
+    }
+}
+
+/// Render description text: `` `code` `` spans become `<code>`, and spans naming another
+/// function (`` `base64d` ``, `` `env(name)` ``) link to it.
+fn render_description_html(text: &str, ctx: &LinkCtx<'_>) -> String {
+    let parts: Vec<&str> = text.split('`').collect();
+    if parts.len().is_multiple_of(2) {
+        // Unbalanced backticks: leave the text exactly as written.
+        return escape_html(text);
+    }
+
+    parts
+        .iter()
+        .enumerate()
+        .map(|(i, part)| if i % 2 == 0 { escape_html(part) } else { render_code_span_html(part, ctx) })
+        .collect()
+}
+
+fn render_code_span_html(span: &str, ctx: &LinkCtx<'_>) -> String {
+    if let Some(anchor) = ctx.target(span) {
+        return ctx.link(anchor, &format!("<code>{}</code>", escape_html(span)));
+    }
+
+    let ident_len = span.find(|c: char| !(c.is_alphanumeric() || c == '_')).unwrap_or(span.len());
+    let (ident, rest) = span.split_at(ident_len);
+    if let Some(anchor) = ctx.target(ident).filter(|_| !ident.is_empty() && rest.starts_with('(')) {
+        return format!("<code>{}{}</code>", ctx.link(anchor, &escape_html(ident)), escape_html(rest));
+    }
+
+    format!("<code>{}</code>", escape_html(span))
+}
+
+/// Words the mq lexer treats as keywords.
+const KEYWORDS: &[&str] = &[
+    "as", "break", "catch", "continue", "def", "do", "elif", "else", "end", "fn", "foreach", "if", "import", "include",
+    "let", "loop", "match", "module", "nodes", "self", "try", "unless", "until", "var", "while", "yield",
+];
+
+/// Literal values (`true`, `false`, `None`).
+const CONSTANTS: &[&str] = &["true", "false", "None"];
+
+fn token_html(class: &str, text: &str) -> String {
+    format!("<span class=\"{class}\">{}</span>", escape_html(text))
+}
+
+/// Highlight example code with a small tokenizer over mq's lexical rules (strings, comments,
+/// numbers, keywords, selectors, calls). With a link context, `name(` calls to a documented
+/// function also link to it, except `def`/`macro` definitions.
+fn render_code_html(code: &str, ctx: Option<&LinkCtx<'_>>) -> String {
+    let chars: Vec<char> = code.chars().collect();
+    let n = chars.len();
+    let is_ident = |c: char| c.is_alphanumeric() || c == '_';
+    let text = |from: usize, to: usize| chars[from..to].iter().collect::<String>();
+    let mut out = String::new();
+    let mut prev_word = String::new();
+    let mut i = 0;
+
+    while i < n {
+        let c = chars[i];
+        let start = i;
+        let interpolated = c == 's' && chars.get(i + 1) == Some(&'"');
+
+        if c == '"' || interpolated {
+            i += if interpolated { 2 } else { 1 };
+            while i < n && chars[i] != '"' {
+                i += if chars[i] == '\\' { 2 } else { 1 };
+            }
+            i = (i + 1).min(n);
+            out.push_str(&token_html("tok-str", &text(start, i)));
+        } else if c == '#' {
+            while i < n && chars[i] != '\n' {
+                i += 1;
+            }
+            out.push_str(&token_html("tok-com", &text(start, i)));
+        } else if c.is_ascii_digit() {
+            while i < n && is_ident(chars[i]) {
+                i += 1;
+            }
+            if chars.get(i) == Some(&'.') && chars.get(i + 1).is_some_and(char::is_ascii_digit) {
+                i += 1;
+                while i < n && is_ident(chars[i]) {
+                    i += 1;
+                }
+            }
+            out.push_str(&token_html("tok-num", &text(start, i)));
+        } else if c == '.' && chars.get(i + 1).is_some_and(|&d| is_ident(d) || matches!(d, '-' | '*' | '[' | '.' | '<' | '>' | '^')) {
+            // Selector: `.h1`, `..`, `.[]`, `.[][]`, `.<>`
+            i += 1;
+            match chars[i] {
+                '.' | '>' | '^' => i += 1,
+                '<' => {
+                    i += 1;
+                    if chars.get(i) == Some(&'>') {
+                        i += 1;
+                    }
+                }
+                '[' => {
+                    while i < n && matches!(chars[i], '[' | ']') {
+                        i += 1;
+                    }
+                }
+                _ => {
+                    while i < n && (is_ident(chars[i]) || matches!(chars[i], '-' | '*')) {
+                        i += 1;
+                    }
+                }
+            }
+            out.push_str(&token_html("tok-sel", &text(start, i)));
+            prev_word.clear();
+        } else if c.is_alphabetic() || c == '_' {
+            while i < n && is_ident(chars[i]) {
+                i += 1;
+            }
+            // `module::name`
+            if chars[i..].starts_with(&[':', ':']) && chars.get(i + 2).is_some_and(|&c| c.is_alphabetic() || c == '_') {
+                i += 2;
+                while i < n && is_ident(chars[i]) {
+                    i += 1;
+                }
+            }
+
+            let word = text(start, i);
+            let is_call = chars.get(i) == Some(&'(');
+            let is_definition = matches!(prev_word.as_str(), "def" | "macro");
+
+            if KEYWORDS.contains(&word.as_str()) {
+                out.push_str(&token_html("tok-kw", &word));
+            } else if CONSTANTS.contains(&word.as_str()) {
+                out.push_str(&token_html("tok-const", &word));
+            } else if is_call {
+                let anchor = ctx.filter(|_| !is_definition).and_then(|ctx| ctx.target(&word).map(|a| (ctx, a)));
+                match anchor {
+                    Some((ctx, anchor)) => out.push_str(&ctx.link(anchor, &token_html("tok-fn", &word))),
+                    None => out.push_str(&token_html("tok-fn", &word)),
+                }
+            } else {
+                out.push_str(&escape_html(&word));
+            }
+            prev_word = word;
+        } else {
+            i += 1;
+            if !c.is_whitespace() {
+                prev_word.clear();
+            }
+            out.push_str(&escape_html(&c.to_string()));
+        }
+    }
+
+    out
+}
+
 /// Render one labeled example: a "Example"-labeled code block for the query, paired with a
 /// "Result"-labeled block for its verified output — symmetric labels rather than a floating
 /// arrow glyph, which renders inconsistently across fonts and is fragile to align.
-fn render_example_html(example: &DocExample, label: &str) -> String {
+fn render_example_html(example: &DocExample, label: &str, ctx: Option<&LinkCtx<'_>>) -> String {
+    let code = render_code_html(&example.code, ctx);
     format!(
         "<div class=\"example\">\n\
          \x20 <div class=\"example-label\">{}</div>\n\
-         \x20 <pre class=\"example-code\"><code>{}</code></pre>\n\
+         \x20 <pre class=\"example-code\"><code>{code}</code></pre>\n\
          \x20 <div class=\"example-label\">Result</div>\n\
          \x20 <pre class=\"example-result\"><code>{}</code></pre>\n\
          </div>",
         escape_html(label),
-        escape_html(&example.code),
         escape_html(&example.expected)
     )
 }
 
 /// "Example" for a single example, "Example 1"/"Example 2"/... when a function documents
 /// several — numbering only appears when it's actually meaningful.
-fn render_examples_html(examples: &[DocExample]) -> String {
+fn render_examples_html(examples: &[DocExample], ctx: Option<&LinkCtx<'_>>) -> String {
     examples
         .iter()
         .enumerate()
         .map(|(i, ex)| {
-            let label =
-                if examples.len() > 1 { format!("Example {}", i + 1) } else { "Example".to_string() };
-            render_example_html(ex, &label)
+            let label = if examples.len() > 1 { format!("Example {}", i + 1) } else { "Example".to_string() };
+            render_example_html(ex, &label, ctx)
         })
         .join("\n")
 }
 
-/// Render a single function/selector as a self-contained card: signature, badges,
-/// description, related-module usage, and every verified example.
-fn render_entry_html(entry: &DocEntry) -> String {
-    let params = entry
+/// Parameters as written in a signature. A type is shown only when it says something:
+/// `dynamic` (what mq-help reports when it has no real type) is left out as noise.
+fn signature_params(entry: &DocEntry) -> String {
+    entry
         .params
         .iter()
-        .map(|p| format!("{}: {}", escape_html(&p.name), escape_html(&p.type_name)))
-        .join(", ");
+        .map(|p| if p.type_name == "dynamic" { p.name.clone() } else { format!("{}: {}", p.name, p.type_name) })
+        .join(", ")
+}
+
+/// Return type as written in a signature, `None` when it is only `dynamic`.
+fn signature_returns(entry: &DocEntry) -> Option<&str> {
+    Some(entry.returns.as_str()).filter(|r| *r != "dynamic" && !r.is_empty())
+}
+
+/// Plain-text signature, e.g. `add(value1, value2)` or `abs(number: number): number`.
+fn signature_text(entry: &DocEntry) -> String {
+    let returns = signature_returns(entry).map(|r| format!(": {r}")).unwrap_or_default();
+    format!("{}({}){returns}", entry.name, signature_params(entry))
+}
+
+/// Split a description into its body and the sentence announcing the deprecation
+/// ("Deprecated: use has_body() instead."), so the notice can be shown as a warning.
+fn split_deprecation(description: &str) -> (String, Option<String>) {
+    let Some(at) = description.to_ascii_lowercase().find("deprecated") else {
+        return (description.to_string(), None);
+    };
+
+    let head = &description[..at];
+    let start = head.rfind(". ").map(|i| i + 2).into_iter().chain(head.rfind('\n').map(|i| i + 1)).max().unwrap_or(0);
+    let end = description[at..]
+        .find(". ")
+        .map(|i| at + i + 1)
+        .or_else(|| description[at..].find('\n').map(|i| at + i))
+        .unwrap_or(description.len());
+
+    let note = description[start..end].trim().to_string();
+    let body = format!("{} {}", description[..start].trim(), description[end..].trim()).trim().to_string();
+    (body, Some(note))
+}
+
+const REPO_URL: &str = "https://github.com/harehare/mq";
+
+/// Version of mq whose docs and sources are shown (the tag source links point at).
+fn mq_version() -> &'static str {
+    mq_lang::Engine::<mq_lang::DefaultModuleResolver>::version()
+}
+
+/// Link to a standard module's `.mq` source in the `mq` repository, at the tag matching the
+/// docs shown. Built-ins have none: they are split between `builtin.mq` and native Rust, and
+/// a user-supplied file has no upstream source to point at.
+fn render_module_source_html(module_name: &str) -> String {
+    if !mq_lang::STANDARD_MODULES.contains_key(module_name) {
+        return String::new();
+    }
+
+    let path = format!("crates/mq-lang/modules/{module_name}.mq");
+    format!(
+        "<p class=\"module-source\">Source: \
+         <a href=\"{REPO_URL}/blob/v{}/{path}\" target=\"_blank\" rel=\"noopener\">{module_name}.mq</a>\
+         <a href=\"{REPO_URL}/edit/main/{path}\" target=\"_blank\" rel=\"noopener\">Edit on GitHub</a></p>",
+        mq_version()
+    )
+}
+
+/// Render a single function/selector as a self-contained card: signature (its name is the permalink), badges,
+/// deprecation warning, aliases, description, related-module usage and every verified example.
+/// Each entry is rendered once, with its permalink `id`; the "All" page clones it in the browser.
+/// `group` is the jump-bar bucket (a letter or a category).
+fn render_entry_html(item: &HtmlItem<'_>, group: &str, index: &LinkIndex) -> String {
+    let entry = item.entry;
+    let ctx = LinkCtx { index, module: item.module, self_anchor: &item.anchor, params: &entry.params };
+
+    let returns = signature_returns(entry).map(|r| format!(": {}", escape_html(r))).unwrap_or_default();
+    // The name is the permalink: clicking it selects the entry's URL and copies it.
     let sig = format!(
-        "<span class=\"entry-name\">{}</span>({params}): {}",
+        "<a class=\"entry-name entry-anchor\" href=\"{}\" title=\"Copy link\">{}</a>({}){returns}",
+        href_fragment(&item.anchor),
         escape_html(&entry.name),
-        escape_html(&entry.returns)
+        escape_html(&signature_params(entry))
     );
 
     let is_selector = entry.kind == "selector";
     let kind_label = if is_selector { "selector" } else { "function" };
     let kind_class = if is_selector { "badge-kind-selector" } else { "badge-kind-function" };
+    let deprecated = is_deprecated(entry);
     let mut badges = format!("<span class=\"badge {kind_class}\">{kind_label}</span>");
-    if is_deprecated(entry) {
+    if deprecated {
         badges.push_str("<span class=\"badge badge-deprecated\">Deprecated</span>");
     }
     if let Some(cap) = &entry.capability {
@@ -445,10 +864,35 @@ fn render_entry_html(entry: &DocEntry) -> String {
         ));
     }
 
-    let description_html = if entry.description.is_empty() {
+    let (body, note) = if deprecated { split_deprecation(&entry.description) } else { (entry.description.clone(), None) };
+    let warning_html = note
+        .map(|note| {
+            format!(
+                "<div class=\"entry-warning\" role=\"note\"><strong>Deprecated</strong><span>{}</span></div>",
+                render_description_html(&note, &ctx)
+            )
+        })
+        .unwrap_or_else(|| {
+            if deprecated {
+                "<div class=\"entry-warning\" role=\"note\"><strong>Deprecated</strong></div>".to_string()
+            } else {
+                String::new()
+            }
+        });
+
+    let anchor = escape_html(&item.anchor);
+    let class = if deprecated { "entry entry-deprecated" } else { "entry" };
+    let aliases_html = if entry.aliases.is_empty() {
         String::new()
     } else {
-        format!("<p class=\"entry-desc\">{}</p>", escape_html(&entry.description))
+        let aliases = entry.aliases.iter().map(|a| format!("<code>{}</code>", escape_html(a))).join(" ");
+        format!("<p class=\"entry-aliases\">Aliases: {aliases}</p>")
+    };
+
+    let description_html = if body.is_empty() {
+        String::new()
+    } else {
+        format!("<p class=\"entry-desc\">{}</p>", render_description_html(&body, &ctx))
     };
 
     let module_html = entry
@@ -466,23 +910,38 @@ fn render_entry_html(entry: &DocEntry) -> String {
     let examples_html = if entry.examples.is_empty() {
         String::new()
     } else {
-        format!("<div class=\"entry-examples\">{}</div>", render_examples_html(&entry.examples))
+        format!("<div class=\"entry-examples\">{}</div>", render_examples_html(&entry.examples, Some(&ctx)))
     };
 
+    // Plain-text facts the page script searches and filters on.
+    let data = format!(
+        "data-anchor=\"{anchor}\" data-group=\"{}\" data-kind=\"{kind_label}\" data-module=\"{}\" data-name=\"{}\" \
+         data-aliases=\"{}\" data-desc=\"{}\" data-cap=\"{}\" data-dep=\"{}\"",
+        escape_html(group),
+        escape_html(item.module_name),
+        escape_html(&entry.name),
+        escape_html(&entry.aliases.join(" ")),
+        escape_html(&entry.description),
+        escape_html(entry.capability.as_deref().unwrap_or("")),
+        u8::from(deprecated),
+    );
+
     format!(
-        "<div class=\"entry\">\n\
+        "<div class=\"{class}\" id=\"{anchor}\" {data}>\n\
          \x20 <div class=\"entry-header\">\n\
          \x20   <code class=\"entry-sig\">{sig}</code>\n\
          \x20   {badges}\n\
          \x20 </div>\n\
-         {description_html}{module_html}{examples_html}\n\
+         {warning_html}{aliases_html}{description_html}{module_html}{examples_html}\n\
          </div>"
     )
 }
 
-/// Render a module's own header doc (description + usage examples) shown above its entries.
+/// Render a module's own header doc (description + usage examples) and source link, shown
+/// above its entries.
 fn render_module_intro_html(m: &ModuleEntry) -> String {
-    if m.description.is_empty() && m.examples.is_empty() {
+    let source = render_module_source_html(&m.name);
+    if m.description.is_empty() && m.examples.is_empty() && source.is_empty() {
         return String::new();
     }
 
@@ -494,34 +953,201 @@ fn render_module_intro_html(m: &ModuleEntry) -> String {
     let examples = if m.examples.is_empty() {
         String::new()
     } else {
-        format!("<div class=\"module-examples\">{}</div>", render_examples_html(&m.examples))
+        format!("<div class=\"module-examples\">{}</div>", render_examples_html(&m.examples, None))
     };
 
-    format!("<div class=\"module-intro\">{desc}{examples}</div>")
+    format!("<div class=\"module-intro\">{desc}{source}{examples}</div>")
+}
+
+/// Jump bar for a page: one link per group (a category, or a letter) that has an entry.
+fn render_jump_bar_html(groups: &[String], label: &str) -> String {
+    let links = groups
+        .iter()
+        .map(|g| {
+            let title = if g == "*" { " title=\"Digits and symbols\"" } else { "" };
+            format!("<a href=\"#\" data-group=\"{0}\"{title}>{0}</a>", escape_html(g))
+        })
+        .join("");
+    format!("<nav class=\"az-nav\" aria-label=\"{label}\">{links}</nav>")
+}
+
+/// Filter chips: `kinds` adds function/selector, the others only appear when the page has
+/// at least one such entry to filter on.
+fn render_chips_html(kinds: bool, capability: bool, deprecated: bool) -> String {
+    let mut chips = Vec::new();
+    if kinds {
+        chips.push(("kind:function", "Functions"));
+        chips.push(("kind:selector", "Selectors"));
+    }
+    if capability {
+        chips.push(("cap", "Requires capability"));
+    }
+    if deprecated {
+        chips.push(("dep", "Deprecated"));
+    }
+    if chips.is_empty() {
+        return String::new();
+    }
+
+    let buttons = chips
+        .iter()
+        .map(|(filter, label)| {
+            format!("<button type=\"button\" class=\"chip\" data-filter=\"{filter}\" aria-pressed=\"false\">{label}</button>")
+        })
+        .join("");
+    format!("<div class=\"chips\" role=\"group\" aria-label=\"Filters\">{buttons}</div>")
+}
+
+/// How a page is rendered.
+struct PageOptions<'a> {
+    id: &'a str,
+    kind_plural: &'a str,
+    intro: &'a str,
+    /// Whether the page holds its entries' cards. The "All" page does not: it only lists which
+    /// entries go where, and the script clones the cards from the module pages.
+    own_cards: bool,
+    active: bool,
+    is_selector: bool,
+}
+
+/// The container for one run of entries. Without cards it records the anchors and group so
+/// the script can fill it in.
+fn entries_box_html(group: &str, members: &[&HtmlItem<'_>], own_cards: bool, index: &LinkIndex) -> String {
+    if own_cards {
+        let cards = members.iter().map(|m| render_entry_html(m, group, index)).join("\n");
+        format!("<div class=\"entries\">\n{cards}\n</div>")
+    } else {
+        let anchors = members.iter().map(|m| escape_html(&m.anchor)).join(" ");
+        format!("<div class=\"entries\" data-group=\"{}\" data-anchors=\"{anchors}\"></div>", escape_html(group))
+    }
 }
 
 /// Build one sidebar-linked page listing every entry (a module's functions or selectors).
-fn build_entries_page(id: &str, kind_plural: &str, intro: &str, entries: &[DocEntry], active: bool) -> String {
-    let rows = entries.iter().map(render_entry_html).join("\n");
-    let count = entries.len();
-    let active_class = if active { " active" } else { "" };
+/// Pages holding built-ins are split under category headings; the rest are listed A–Z.
+fn build_entries_page(opts: &PageOptions<'_>, items: &[&HtmlItem<'_>], index: &LinkIndex) -> String {
+    let grouped = !opts.is_selector && items.iter().any(|item| item.builtin);
+
+    // Consecutive runs of entries sharing a group: a category, or a letter on A–Z pages.
+    let mut sorted = items.to_vec();
+    if grouped {
+        sorted.sort_by_cached_key(|item| (item.rank, entry_sort_key(&item.entry.name), item.entry.name.clone()));
+    }
+    let mut sections: Vec<(String, Vec<&HtmlItem<'_>>)> = Vec::new();
+    for item in sorted {
+        let group = if grouped { item.group.clone() } else { entry_letter(&item.entry.name).to_string() };
+        match sections.last_mut() {
+            Some((last, members)) if *last == group => members.push(item),
+            _ => sections.push((group, vec![item])),
+        }
+    }
+    let groups: Vec<String> = sections.iter().map(|(g, _)| g.clone()).collect();
+
+    let rows = if grouped {
+        sections
+            .iter()
+            .map(|(group, members)| {
+                format!(
+                    "<section class=\"entry-group\">\n\
+                     <h2 class=\"group-title\">{}<span class=\"group-count\">{}</span></h2>\n\
+                     {}\n\
+                     </section>",
+                    escape_html(group),
+                    members.len(),
+                    entries_box_html(group, members, opts.own_cards, index)
+                )
+            })
+            .join("\n")
+    } else if opts.own_cards {
+        let cards = sections
+            .iter()
+            .flat_map(|(group, members)| members.iter().map(move |m| render_entry_html(m, group, index)))
+            .join("\n");
+        format!("<div class=\"entries\">\n{cards}\n</div>")
+    } else {
+        sections.iter().map(|(group, members)| entries_box_html(group, members, false, index)).join("\n")
+    };
+
+    let jump_label = if grouped { "Jump to category" } else { "Jump to letter" };
+    let jump_bar = render_jump_bar_html(&groups, jump_label);
+    let chips = render_chips_html(
+        false,
+        items.iter().any(|item| item.entry.capability.is_some()),
+        items.iter().any(|item| is_deprecated(item.entry)),
+    );
+    let PageOptions { id, kind_plural, intro, .. } = opts;
+    let count = items.len();
+    let active_class = if opts.active { " active" } else { "" };
+    let grouped_class = if grouped { " grouped" } else { "" };
     format!(
-        "<div class=\"module-page{active_class}\" id=\"{id}\">\n\
+        "<div class=\"module-page{active_class}{grouped_class}\" id=\"{id}\">\n\
          {intro}\n\
-         \x20 <div class=\"search-box\">\n\
-         \x20   <svg class=\"search-icon\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><circle cx=\"11\" cy=\"11\" r=\"8\"/><line x1=\"21\" y1=\"21\" x2=\"16.65\" y2=\"16.65\"/></svg>\n\
-         \x20   <input type=\"text\" class=\"search-input\" placeholder=\"Filter {kind_plural}...\" />\n\
+         \x20 <div class=\"page-toolbar\">\n\
+         \x20   <div class=\"search-box\">\n\
+         \x20     <svg class=\"search-icon\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><circle cx=\"11\" cy=\"11\" r=\"8\"/><line x1=\"21\" y1=\"21\" x2=\"16.65\" y2=\"16.65\"/></svg>\n\
+         \x20     <input type=\"text\" class=\"search-input\" placeholder=\"Filter {kind_plural} on this page...\" aria-label=\"Filter {kind_plural} on this page\" />\n\
+         \x20   </div>\n\
+         \x20   {chips}\n\
+         \x20   {jump_bar}\n\
          \x20 </div>\n\
          \x20 <p class=\"count\"><span class=\"count-num\">{count}</span> {kind_plural}</p>\n\
-         \x20 <div class=\"entries\">\n{rows}\n\x20 </div>\n\
+         {rows}\n\
+         \x20 <p class=\"no-results\" hidden>No results</p>\n\
          </div>"
     )
 }
 
+/// The page that shows results of the sidebar's search across every module.
+fn build_search_page() -> String {
+    let chips = render_chips_html(true, true, true);
+    format!(
+        "<div class=\"module-page search-page\" id=\"search-results\">\n\
+         \x20 <div class=\"page-toolbar\">\n\
+         \x20   {chips}\n\
+         \x20 </div>\n\
+         \x20 <p class=\"count\"><span class=\"count-num\">0</span> results for &ldquo;<span class=\"search-term\"></span>&rdquo;</p>\n\
+         \x20 <div class=\"results\" role=\"listbox\" aria-label=\"Search results\"></div>\n\
+         \x20 <p class=\"no-results\" hidden>No results</p>\n\
+         </div>"
+    )
+}
+
+/// One sidebar link; its `href` is the page id so the URL hash selects the page.
+fn sidebar_link(page_id: &str, icon: &str, name: &str, count: usize, active: bool) -> String {
+    let active_class = if active { " active" } else { "" };
+    format!(
+        "<a class=\"sidebar-link{active_class}\" href=\"#{page_id}\" data-module=\"{page_id}\">\
+         <span class=\"sidebar-icon\">{icon}</span>\
+         <span class=\"sidebar-label\">{}</span>\
+         <span class=\"sidebar-count\">{count}</span></a>\n",
+        escape_html(name)
+    )
+}
+
+/// Links to the rest of the mq site, shown in the sidebar header.
+fn site_links_html() -> String {
+    [
+        ("mqlang.org", "https://mqlang.org/"),
+        ("Playground", "https://mqlang.org/playground"),
+        ("GitHub", REPO_URL),
+        ("Book", "https://mqlang.org/book/"),
+        ("Cookbook", "https://mqlang.org/book/cookbook"),
+    ]
+    .iter()
+    .map(|(label, url)| format!("<a href=\"{url}\" target=\"_blank\" rel=\"noopener\">{label}</a>"))
+    .join("")
+}
+
 /// Format documentation as a single-page HTML with sidebar navigation.
+///
+/// The URL is the router: `#mod-csv` opens a module page, `#csv::csv_parse` (or `#abs` for
+/// built-ins) opens the page holding that entry and scrolls to it, and `?q=` keeps the
+/// sidebar's cross-module search.
 fn format_html(modules: &[ModuleEntry]) -> String {
     let has_multiple = modules.len() > 1;
     let has_selectors = modules.iter().any(|m| !m.selectors.is_empty());
+
+    let layouts = layout_modules(modules);
+    let index = LinkIndex::new(modules, &layouts);
 
     let sidebar_items = if has_multiple {
         let all_count: usize = modules.iter().map(|m| m.functions.len()).sum();
@@ -531,81 +1157,65 @@ fn format_html(modules: &[ModuleEntry]) -> String {
              <rect x=\"3\" y=\"14\" width=\"7\" height=\"7\"/>\
              <rect x=\"14\" y=\"14\" width=\"7\" height=\"7\"/>",
         );
-        let mut items = format!(
-            "<a class=\"sidebar-link active\" href=\"#\" data-module=\"mod-all\">\
-             <span class=\"sidebar-icon\">{all_icon}</span>\
-             <span class=\"sidebar-label\">All</span>\
-             <span class=\"sidebar-count\">{all_count}</span></a>\n"
-        );
-        for (i, m) in modules.iter().enumerate() {
-            let name = escape_html(&m.name);
-            let count = m.functions.len();
-            let icon = module_icon(&m.name);
-            items.push_str(&format!(
-                "<a class=\"sidebar-link\" href=\"#\" data-module=\"mod-{i}\">\
-                 <span class=\"sidebar-icon\">{icon}</span>\
-                 <span class=\"sidebar-label\">{name}</span>\
-                 <span class=\"sidebar-count\">{count}</span></a>\n"
-            ));
+        let mut items = sidebar_link("mod-all", &all_icon, "All", all_count, true);
+        for (m, layout) in modules.iter().zip(&layouts) {
+            items.push_str(&sidebar_link(&layout.page_id, &module_icon(&m.name), &m.name, m.functions.len(), false));
         }
         items
     } else {
         let m = &modules[0];
-        let name = escape_html(&m.name);
-        let count = m.functions.len();
-        let icon = module_icon(&m.name);
-        format!(
-            "<a class=\"sidebar-link active\" href=\"#\" data-module=\"mod-all\">\
-             <span class=\"sidebar-icon\">{icon}</span>\
-             <span class=\"sidebar-label\">{name}</span>\
-             <span class=\"sidebar-count\">{count}</span></a>\n"
-        )
+        sidebar_link("mod-all", &module_icon(&m.name), &m.name, m.functions.len(), true)
     };
 
-    let selector_sidebar_items = if has_selectors {
-        let mut items = String::new();
-        for (i, m) in modules.iter().enumerate() {
-            if m.selectors.is_empty() {
-                continue;
-            }
-            let name = escape_html(&m.name);
-            let count = m.selectors.len();
-            let icon = selector_icon();
-            items.push_str(&format!(
-                "<a class=\"sidebar-link\" href=\"#\" data-module=\"sel-{i}\">\
-                 <span class=\"sidebar-icon\">{icon}</span>\
-                 <span class=\"sidebar-label\">{name}</span>\
-                 <span class=\"sidebar-count\">{count}</span></a>\n"
-            ));
-        }
-        items
-    } else {
-        String::new()
+    let selector_sidebar_items: String = modules
+        .iter()
+        .zip(&layouts)
+        .filter(|(m, _)| !m.selectors.is_empty())
+        .map(|(m, layout)| sidebar_link(&layout.selector_page_id, &selector_icon(), &m.name, m.selectors.len(), false))
+        .collect();
+
+    let function_page = |id: &str, intro: &str, items: &[&HtmlItem<'_>], own_cards: bool, active: bool| {
+        let opts = PageOptions { id, kind_plural: "functions", intro, own_cards, active, is_selector: false };
+        build_entries_page(&opts, items, &index)
     };
 
     let mut pages = if has_multiple {
-        let all_functions: Vec<DocEntry> = modules.iter().flat_map(|m| m.functions.iter().cloned()).collect();
-        let mut pages_html = build_entries_page("mod-all", "functions", "", &all_functions, true);
-        for (i, m) in modules.iter().enumerate() {
+        // The "All" page repeats every entry, merged and sorted; the per-module pages own the ids.
+        let mut all: Vec<&HtmlItem<'_>> = layouts.iter().flat_map(|l| l.functions.iter()).collect();
+        all.sort_by_cached_key(|item| (entry_sort_key(&item.entry.name), item.entry.name.clone()));
+        let mut pages_html = function_page("mod-all", "", &all, false, true);
+        for (m, layout) in modules.iter().zip(&layouts) {
             pages_html.push('\n');
             let intro = render_module_intro_html(m);
-            pages_html.push_str(&build_entries_page(&format!("mod-{i}"), "functions", &intro, &m.functions, false));
+            let items: Vec<&HtmlItem<'_>> = layout.functions.iter().collect();
+            pages_html.push_str(&function_page(&layout.page_id, &intro, &items, true, false));
         }
         pages_html
     } else {
         let intro = render_module_intro_html(&modules[0]);
-        build_entries_page("mod-all", "functions", &intro, &modules[0].functions, true)
+        let items: Vec<&HtmlItem<'_>> = layouts[0].functions.iter().collect();
+        function_page("mod-all", &intro, &items, true, true)
     };
 
-    if has_selectors {
-        for (i, m) in modules.iter().enumerate() {
-            if m.selectors.is_empty() {
-                continue;
-            }
-            pages.push('\n');
-            pages.push_str(&build_entries_page(&format!("sel-{i}"), "selectors", "", &m.selectors, false));
+    for (m, layout) in modules.iter().zip(&layouts) {
+        if m.selectors.is_empty() {
+            continue;
         }
+        pages.push('\n');
+        let items: Vec<&HtmlItem<'_>> = layout.selectors.iter().collect();
+        let opts = PageOptions {
+            id: &layout.selector_page_id,
+            kind_plural: "selectors",
+            intro: "",
+            own_cards: true,
+            active: false,
+            is_selector: true,
+        };
+        pages.push_str(&build_entries_page(&opts, &items, &index));
     }
+    // Last, so the script can leave it out of the module pages it routes between.
+    pages.push('\n');
+    pages.push_str(&build_search_page());
 
     let selector_section = if has_selectors {
         format!(
@@ -618,8 +1228,12 @@ fn format_html(modules: &[ModuleEntry]) -> String {
         String::new()
     };
 
+    let site_links = site_links_html();
+    let style = include_str!("docs.css");
+    let script = include_str!("docs.js");
+
     format!(
-        r#"<!DOCTYPE html>
+        r##"<!DOCTYPE html>
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
@@ -629,437 +1243,11 @@ fn format_html(modules: &[ModuleEntry]) -> String {
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700&display=swap" rel="stylesheet" />
     <style>
-      :root {{
-        --bg-primary: #2a3444;
-        --bg-secondary: #232d3b;
-        --bg-tertiary: #3d4a5c;
-        --bg-elevated: #313d50;
-        --text-primary: #e2e8f0;
-        --text-secondary: #cbd5e1;
-        --text-muted: #94a3b8;
-        --accent-primary: #67b8e3;
-        --accent-secondary: #4fc3f7;
-        --border-default: #4a5568;
-        --border-muted: #374151;
-        --code-bg: #1e293b;
-        --code-bg-inline: #374151;
-        --code-color: #e2e8f0;
-        --deprecated-color: #f87171;
-        --capability-color: #facc15;
-        --selector-color: #c491f5;
-        --sidebar-width: 260px;
-      }}
-
-      * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-      html {{ height: 100%; scroll-behavior: smooth; }}
-
-      body {{
-        background-color: var(--bg-primary);
-        color: var(--text-primary);
-        font-family: "Montserrat", -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif;
-        font-weight: 400;
-        line-height: 1.6;
-        min-height: 100vh;
-      }}
-
-      /* ---- Layout ---- */
-      .layout {{
-        display: flex;
-        min-height: 100vh;
-      }}
-
-      .sidebar {{
-        background-color: var(--bg-secondary);
-        border-right: 1px solid var(--border-default);
-        display: flex;
-        flex-direction: column;
-        height: 100vh;
-        overflow-y: auto;
-        position: fixed;
-        top: 0;
-        left: 0;
-        width: var(--sidebar-width);
-        z-index: 50;
-      }}
-
-      .sidebar-header {{
-        border-bottom: 1px solid var(--border-default);
-        padding: 1.25rem 1.25rem 1rem;
-      }}
-
-      .sidebar-header h1 {{
-        color: var(--accent-primary);
-        font-size: 1.3rem;
-        font-weight: 700;
-        letter-spacing: -0.3px;
-      }}
-
-      .sidebar-header p {{
-        color: var(--text-muted);
-        font-size: 0.75rem;
-        margin-top: 0.2rem;
-      }}
-
-      .sidebar-section {{
-        padding: 0.75rem 0;
-      }}
-
-      .sidebar-section-title {{
-        color: var(--text-muted);
-        font-size: 0.7rem;
-        font-weight: 600;
-        letter-spacing: 0.8px;
-        padding: 0.25rem 1.25rem 0.5rem;
-        text-transform: uppercase;
-      }}
-
-      .sidebar-link {{
-        align-items: center;
-        border-left: 3px solid transparent;
-        color: var(--text-secondary);
-        cursor: pointer;
-        display: flex;
-        font-size: 0.85rem;
-        gap: 0.6rem;
-        padding: 0.5rem 1.25rem;
-        text-decoration: none;
-        transition: all 0.15s;
-      }}
-
-      .sidebar-link:hover {{
-        background-color: rgba(103, 184, 227, 0.06);
-        color: var(--text-primary);
-      }}
-
-      .sidebar-link.active {{
-        background-color: rgba(103, 184, 227, 0.1);
-        border-left-color: var(--accent-primary);
-        color: var(--accent-primary);
-        font-weight: 600;
-      }}
-
-      .sidebar-icon {{
-        display: flex;
-        align-items: center;
-        flex-shrink: 0;
-      }}
-
-      .sidebar-icon svg {{
-        height: 16px;
-        width: 16px;
-      }}
-
-      .sidebar-label {{
-        flex: 1;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-      }}
-
-      .sidebar-count {{
-        background-color: var(--bg-tertiary);
-        border-radius: 10px;
-        color: var(--text-muted);
-        font-size: 0.7rem;
-        font-weight: 600;
-        min-width: 1.6rem;
-        padding: 0.1rem 0.45rem;
-        text-align: center;
-      }}
-
-      .sidebar-link.active .sidebar-count {{
-        background-color: rgba(103, 184, 227, 0.15);
-        color: var(--accent-primary);
-      }}
-
-      .content {{
-        flex: 1;
-        margin-left: var(--sidebar-width);
-        padding: 2rem 2.5rem;
-        max-width: calc(100% - var(--sidebar-width));
-      }}
-
-      /* ---- Mobile sidebar toggle ---- */
-      .sidebar-toggle {{
-        background-color: var(--bg-tertiary);
-        border: 1px solid var(--border-default);
-        border-radius: 8px;
-        color: var(--text-primary);
-        cursor: pointer;
-        display: none;
-        left: 1rem;
-        padding: 0.5rem;
-        position: fixed;
-        top: 1rem;
-        z-index: 60;
-      }}
-
-      .sidebar-toggle svg {{
-        display: block;
-        height: 20px;
-        width: 20px;
-      }}
-
-      .sidebar-overlay {{
-        background-color: rgba(0, 0, 0, 0.5);
-        display: none;
-        inset: 0;
-        position: fixed;
-        z-index: 40;
-      }}
-
-      /* ---- Pages ---- */
-      .module-page {{ display: none; }}
-      .module-page.active {{ display: block; }}
-
-      .page-title {{
-        color: var(--text-primary);
-        font-size: 1.5rem;
-        font-weight: 700;
-        margin-bottom: 1.5rem;
-      }}
-
-      .search-box {{
-        margin-bottom: 1.5rem;
-        position: relative;
-      }}
-
-      .search-box input {{
-        background-color: var(--bg-tertiary);
-        border: 1px solid var(--border-default);
-        border-radius: 8px;
-        color: var(--text-primary);
-        font-family: inherit;
-        font-size: 0.95rem;
-        padding: 0.75rem 1rem 0.75rem 2.5rem;
-        width: 100%;
-        transition: border-color 0.2s;
-      }}
-
-      .search-box input:focus {{
-        border-color: var(--accent-primary);
-        outline: none;
-      }}
-
-      .search-box .search-icon {{
-        color: var(--text-muted);
-        height: 16px;
-        left: 0.85rem;
-        pointer-events: none;
-        position: absolute;
-        top: 50%;
-        transform: translateY(-50%);
-        width: 16px;
-      }}
-
-      .count {{
-        color: var(--text-muted);
-        font-size: 0.85rem;
-        margin-bottom: 1rem;
-      }}
-
-      /* ---- Module intro (header doc + usage examples) ---- */
-      .module-intro {{
-        border-bottom: 1px solid var(--border-default);
-        margin-bottom: 1.5rem;
-        padding-bottom: 1.25rem;
-      }}
-
-      .module-desc {{
-        color: var(--text-secondary);
-        margin-bottom: 0.75rem;
-      }}
-
-      /* ---- Entries ---- */
-      .entries {{
-        display: flex;
-        flex-direction: column;
-        gap: 1.25rem;
-      }}
-
-      .entry {{
-        background-color: var(--bg-elevated);
-        border: 1px solid rgba(148, 163, 184, 0.18);
-        border-radius: 10px;
-        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
-        padding: 1.1rem 1.35rem;
-      }}
-
-      .entry-header {{
-        align-items: center;
-        display: flex;
-        flex-wrap: wrap;
-        gap: 0.5rem;
-        margin-bottom: 0.5rem;
-      }}
-
-      .entry-sig {{
-        background: none;
-        color: var(--text-secondary);
-        font-family: "Consolas", "Monaco", "Courier New", monospace;
-        font-size: 0.95rem;
-        padding: 0;
-        word-break: break-word;
-      }}
-
-      .entry-name {{
-        color: var(--accent-primary);
-        font-weight: 700;
-      }}
-
-      .badge {{
-        border-radius: 10px;
-        font-size: 0.68rem;
-        font-weight: 600;
-        letter-spacing: 0.3px;
-        padding: 0.15rem 0.55rem;
-        text-transform: uppercase;
-        white-space: nowrap;
-      }}
-
-      .badge-kind-function {{
-        background-color: rgba(103, 184, 227, 0.15);
-        color: var(--accent-primary);
-      }}
-
-      .badge-kind-selector {{
-        background-color: rgba(196, 145, 245, 0.15);
-        color: var(--selector-color);
-      }}
-
-      .badge-deprecated {{
-        background-color: rgba(248, 113, 113, 0.15);
-        color: var(--deprecated-color);
-      }}
-
-      .badge-capability {{
-        background-color: rgba(250, 204, 21, 0.15);
-        color: var(--capability-color);
-        cursor: help;
-      }}
-
-      .entry-desc {{
-        color: var(--text-secondary);
-        font-size: 0.9rem;
-        margin-bottom: 0.4rem;
-      }}
-
-      .entry-module {{
-        color: var(--text-muted);
-        font-size: 0.8rem;
-        margin-bottom: 0.5rem;
-      }}
-
-      .entry-module code {{
-        background: none;
-        padding: 0;
-      }}
-
-      .module-examples, .entry-examples {{
-        display: flex;
-        flex-direction: column;
-        gap: 0.5rem;
-        margin-top: 0.5rem;
-      }}
-
-      .example {{
-        display: flex;
-        flex-direction: column;
-        gap: 0.4rem;
-      }}
-
-      .example-label {{
-        color: var(--text-muted);
-        font-size: 0.68rem;
-        font-weight: 600;
-        letter-spacing: 0.5px;
-        text-transform: uppercase;
-      }}
-
-      .example-code, .example-result {{
-        border-radius: 6px;
-        font-family: "Consolas", "Monaco", "Courier New", monospace;
-        font-size: 0.82rem;
-        margin: 0;
-        max-width: 70ch;
-        overflow-x: auto;
-        padding: 0.55rem 0.75rem;
-        white-space: pre-wrap;
-        word-break: break-word;
-      }}
-
-      .example-code {{ background-color: var(--code-bg); }}
-      .example-result {{
-        background-color: var(--bg-tertiary);
-        color: var(--text-secondary);
-      }}
-
-      code {{
-        background-color: var(--code-bg-inline);
-        border-radius: 4px;
-        color: var(--code-color);
-        font-family: "Consolas", "Monaco", "Courier New", monospace;
-        font-size: 0.85em;
-        padding: 0.15em 0.4em;
-      }}
-
-      footer {{
-        border-top: 1px solid var(--border-default);
-        margin-left: var(--sidebar-width);
-        padding: 1.5rem 2.5rem;
-      }}
-
-      footer p {{
-        color: var(--text-muted);
-        font-size: 0.85rem;
-      }}
-
-      footer a {{
-        color: var(--accent-primary);
-        text-decoration: none;
-      }}
-
-      footer a:hover {{
-        color: var(--accent-secondary);
-        text-decoration: underline;
-      }}
-
-      @media (max-width: 768px) {{
-        .sidebar {{
-          transform: translateX(-100%);
-          transition: transform 0.25s ease;
-        }}
-
-        .sidebar.open {{
-          transform: translateX(0);
-        }}
-
-        .sidebar-toggle {{
-          display: block;
-        }}
-
-        .sidebar-overlay.open {{
-          display: block;
-        }}
-
-        .content {{
-          margin-left: 0;
-          max-width: 100%;
-          padding: 1.5rem 1rem;
-          padding-top: 4rem;
-        }}
-
-        footer {{
-          margin-left: 0;
-          padding: 1.5rem 1rem;
-        }}
-
-        .entry-sig {{ font-size: 0.8rem; }}
-      }}
+{style}
     </style>
   </head>
   <body>
-    <button class="sidebar-toggle" id="sidebarToggle">
+    <button class="sidebar-toggle" id="sidebarToggle" aria-label="Toggle navigation">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/>
       </svg>
@@ -1071,6 +1259,12 @@ fn format_html(modules: &[ModuleEntry]) -> String {
         <div class="sidebar-header">
           <h1>mq</h1>
           <p>Function Reference</p>
+          <nav class="site-links" aria-label="mq sites">{site_links}</nav>
+        </div>
+        <div class="global-search">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          <input type="search" id="globalSearch" placeholder="Search all modules" aria-label="Search all modules" autocomplete="off" spellcheck="false" />
+          <kbd title="Press / or Ctrl+K to search">/</kbd>
         </div>
         <nav class="sidebar-section">
           <div class="sidebar-section-title">Modules</div>
@@ -1085,58 +1279,19 @@ fn format_html(modules: &[ModuleEntry]) -> String {
     </div>
 
     <footer>
-      <p>Generated by <a href="https://github.com/harehare/mq">mq</a></p>
+      <p>
+        Generated by <a href="https://github.com/harehare/mq">mq</a>
+        <span class="footer-links">
+          <a href="https://mqlang.org/llms.txt" target="_blank" rel="noopener">llms.txt</a>
+        </span>
+      </p>
     </footer>
 
     <script>
-      // Sidebar navigation
-      document.querySelectorAll(".sidebar-link").forEach(function (link) {{
-        link.addEventListener("click", function (e) {{
-          e.preventDefault();
-          document.querySelectorAll(".sidebar-link").forEach(function (l) {{
-            l.classList.remove("active");
-          }});
-          link.classList.add("active");
-
-          var target = link.getAttribute("data-module");
-          document.querySelectorAll(".module-page").forEach(function (page) {{
-            page.classList.toggle("active", page.id === target);
-          }});
-
-          // Close mobile sidebar
-          document.getElementById("sidebar").classList.remove("open");
-          document.getElementById("sidebarOverlay").classList.remove("open");
-        }});
-      }});
-
-      // Search filter
-      document.querySelectorAll(".search-input").forEach(function (input) {{
-        input.addEventListener("input", function () {{
-          var page = input.closest(".module-page");
-          var q = input.value.toLowerCase();
-          var entries = page.querySelectorAll(".entry");
-          var visible = 0;
-          entries.forEach(function (entry) {{
-            var show = entry.textContent.toLowerCase().includes(q);
-            entry.style.display = show ? "" : "none";
-            if (show) visible++;
-          }});
-          page.querySelector(".count-num").textContent = visible;
-        }});
-      }});
-
-      // Mobile sidebar toggle
-      document.getElementById("sidebarToggle").addEventListener("click", function () {{
-        document.getElementById("sidebar").classList.toggle("open");
-        document.getElementById("sidebarOverlay").classList.toggle("open");
-      }});
-      document.getElementById("sidebarOverlay").addEventListener("click", function () {{
-        document.getElementById("sidebar").classList.remove("open");
-        document.getElementById("sidebarOverlay").classList.remove("open");
-      }});
+{script}
     </script>
   </body>
-</html>"#,
+</html>"##,
     )
 }
 
@@ -1148,9 +1303,14 @@ fn svg_icon(inner: &str) -> String {
     )
 }
 
+/// Whether a module name is the native built-ins group.
+fn is_builtin_name(name: &str) -> bool {
+    name.starts_with("Built-in")
+}
+
 /// Return an appropriate SVG icon for a module name.
 fn module_icon(name: &str) -> String {
-    if name.starts_with("Built-in") {
+    if is_builtin_name(name) {
         // cube icon
         svg_icon(
             "<path d=\"M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z\"/>\
@@ -1183,4 +1343,199 @@ fn selector_icon() -> String {
 /// Escape HTML special characters.
 fn escape_html(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(name: &str, kind: &'static str, aliases: &[&str]) -> DocEntry {
+        DocEntry {
+            name: name.to_string(),
+            kind,
+            params: vec![DocParam { name: "path".to_string(), type_name: "string".to_string() }],
+            returns: "string".to_string(),
+            description: String::new(),
+            examples: Vec::new(),
+            capability: None,
+            related_module: None,
+            aliases: aliases.iter().map(|a| a.to_string()).collect(),
+        }
+    }
+
+    fn module(name: &str, functions: Vec<DocEntry>, selectors: Vec<DocEntry>) -> ModuleEntry {
+        ModuleEntry { name: name.to_string(), description: String::new(), examples: Vec::new(), functions, selectors }
+    }
+
+    fn fixture() -> Vec<ModuleEntry> {
+        vec![
+            module(
+                "Built-in",
+                vec![entry("abs", "function", &[]), entry("path", "function", &[])],
+                vec![entry(".text", "selector", &[".p"])],
+            ),
+            module("csv", vec![entry("csv_parse", "function", &[]), entry("abs", "function", &[])], Vec::new()),
+        ]
+    }
+
+    #[test]
+    fn permalinks_are_unique_and_module_scoped() {
+        let modules = fixture();
+        let layouts = layout_modules(&modules);
+
+        assert_eq!(layouts[0].page_id, "mod-built-in");
+        assert_eq!(layouts[1].page_id, "mod-csv");
+        let anchors = |items: &[HtmlItem<'_>]| items.iter().map(|i| i.anchor.clone()).collect::<Vec<_>>();
+        assert_eq!(anchors(&layouts[0].functions), ["abs", "path"]);
+        assert_eq!(anchors(&layouts[0].selectors), [".text"]);
+        assert_eq!(anchors(&layouts[1].functions), ["csv::abs", "csv::csv_parse"]);
+    }
+
+    #[test]
+    fn href_fragment_encodes_selector_symbols() {
+        assert_eq!(href_fragment("csv::csv_parse"), "#csv::csv_parse");
+        assert_eq!(href_fragment(".[]"), "#.%5B%5D");
+    }
+
+    #[test]
+    fn jump_letter_buckets_symbols() {
+        assert_eq!(entry_letter("abs"), 'A');
+        assert_eq!(entry_letter(".h1"), 'H');
+        assert_eq!(entry_letter(".[]"), '*');
+        assert_eq!(entry_letter("1st"), '*');
+    }
+
+    #[test]
+    fn description_links_code_spans_but_not_params_or_self() {
+        let modules = fixture();
+        let layouts = layout_modules(&modules);
+        let index = LinkIndex::new(&modules, &layouts);
+        let params = [DocParam { name: "path".to_string(), type_name: "string".to_string() }];
+        let ctx = LinkCtx { index: &index, module: 1, self_anchor: "csv::csv_parse", params: &params };
+
+        let html = render_description_html("Like `abs` or `csv::abs` or `.p`, not `path` or `csv_parse(x)`.", &ctx);
+
+        // Bare `abs` prefers the current module, `.p` resolves through its alias,
+        // and the parameter name and the entry itself stay plain.
+        assert!(html.contains("<a class=\"xref\" href=\"#csv::abs\"><code>abs</code></a>"));
+        assert!(html.contains("<a class=\"xref\" href=\"#csv::abs\"><code>csv::abs</code></a>"));
+        assert!(html.contains("<a class=\"xref\" href=\"#.text\"><code>.p</code></a>"));
+        assert!(html.contains("<code>path</code>"));
+        assert!(html.contains("<code>csv_parse(x)</code>"));
+    }
+
+    #[test]
+    fn code_links_calls_only() {
+        let modules = fixture();
+        let layouts = layout_modules(&modules);
+        let index = LinkIndex::new(&modules, &layouts);
+        let ctx = LinkCtx { index: &index, module: 0, self_anchor: "path", params: &[] };
+
+        let html =
+            render_code_html("abs(1) | .abs | \"abs(2)\" | def abs(x): x; # abs(3)\ncsv::csv_parse(\"a\")", Some(&ctx));
+
+        assert!(html.starts_with("<a class=\"xref\" href=\"#abs\"><span class=\"tok-fn\">abs</span></a>(<span class=\"tok-num\">1</span>)"));
+        assert_eq!(html.matches("class=\"xref\"").count(), 2);
+        assert!(html.contains("<a class=\"xref\" href=\"#csv::csv_parse\"><span class=\"tok-fn\">csv::csv_parse</span></a>"));
+    }
+
+    #[test]
+    fn html_shows_aliases_and_renders_each_entry_once() {
+        let html = format_html(&fixture());
+
+        assert!(html.contains("Aliases: <code>.p</code>"));
+        assert_eq!(html.matches("id=\".text\"").count(), 1);
+        assert_eq!(html.matches("data-anchor=\".text\"").count(), 1);
+        // The "All" page only lists `abs` by anchor; the script clones the one canonical card.
+        assert_eq!(html.matches("data-anchor=\"abs\"").count(), 1);
+        assert_eq!(html.matches("id=\"abs\"").count(), 1);
+        assert!(html.contains("data-anchors=\"abs\""));
+        assert!(html.contains("data-anchors=\"csv::abs csv::csv_parse\""));
+        assert!(html.contains("href=\"#mod-csv\" data-module=\"mod-csv\""));
+    }
+
+    #[test]
+    fn code_is_highlighted() {
+        let html = render_code_html("let x = 1.5 | if (true): .h1 else: s\"a${x}\" # note", None);
+
+        for expected in [
+            "<span class=\"tok-kw\">let</span>",
+            "<span class=\"tok-num\">1.5</span>",
+            "<span class=\"tok-kw\">if</span>",
+            "<span class=\"tok-const\">true</span>",
+            "<span class=\"tok-sel\">.h1</span>",
+            "<span class=\"tok-str\">s&quot;a${x}&quot;</span>",
+            "<span class=\"tok-com\"># note</span>",
+        ] {
+            assert!(html.contains(expected), "{expected} missing from {html}");
+        }
+        // A bare identifier that is not called stays plain.
+        assert!(html.contains(" x ") || html.contains("let</span> x"));
+    }
+
+    #[test]
+    fn signature_omits_dynamic_types() {
+        let mut e = entry("add", "function", &[]);
+        e.params = vec![
+            DocParam { name: "a".to_string(), type_name: "dynamic".to_string() },
+            DocParam { name: "n".to_string(), type_name: "number".to_string() },
+        ];
+        e.returns = "dynamic".to_string();
+        assert_eq!(signature_text(&e), "add(a, n: number)");
+
+        e.returns = "number".to_string();
+        assert_eq!(signature_text(&e), "add(a, n: number): number");
+    }
+
+    #[test]
+    fn deprecation_notice_is_split_from_description() {
+        let (body, note) = split_deprecation("Checks content. Deprecated: use has_body() instead.");
+        assert_eq!(body, "Checks content.");
+        assert_eq!(note.as_deref(), Some("Deprecated: use has_body() instead."));
+
+        let (body, note) = split_deprecation("Old thing (deprecated). Still works.");
+        assert_eq!(note.as_deref(), Some("Old thing (deprecated)."));
+        assert_eq!(body, "Still works.");
+    }
+
+    #[test]
+    fn only_standard_modules_link_to_their_source() {
+        let csv = render_module_source_html("csv");
+        assert!(csv.contains("/blob/v"));
+        assert!(csv.contains("/crates/mq-lang/modules/csv.mq\""));
+        assert!(csv.contains("/edit/main/crates/mq-lang/modules/csv.mq"));
+
+        assert!(render_module_source_html("Built-in").is_empty());
+        assert!(render_module_source_html("my/file.mq").is_empty());
+    }
+
+    #[test]
+    fn html_groups_builtins_and_links_out() {
+        let mut modules = fixture();
+        modules[0].functions.push(entry("is_string", "function", &[]));
+        let mut old = entry("old_fn", "function", &[]);
+        old.description = "Does a thing. Deprecated: use abs() instead.".to_string();
+        modules[1].functions.push(old);
+        let html = format_html(&modules);
+
+        // Built-ins sit under category headings, other modules under their own name.
+        assert!(html.contains("<h2 class=\"group-title\">Math &amp; Statistics<span"));
+        assert!(html.contains("<h2 class=\"group-title\">Type Checks<span"));
+        assert!(html.contains("<h2 class=\"group-title\">csv<span"));
+        assert!(html.contains("data-group=\"Type Checks\""));
+        // Deprecated entries get a warning card and class; selectors stay A–Z.
+        assert!(html.contains("<div class=\"entry-warning\" role=\"note\"><strong>Deprecated</strong>"));
+        assert!(html.contains("class=\"entry entry-deprecated\""));
+        assert!(html.contains("data-group=\"T\""));
+        // Site links, the module's source link and llms.txt.
+        for expected in [
+            "https://mqlang.org/playground",
+            "https://mqlang.org/book/cookbook",
+            "https://mqlang.org/llms.txt",
+            "/edit/main/crates/mq-lang/modules/csv.mq",
+            "id=\"globalSearch\"",
+        ] {
+            assert!(html.contains(expected), "{expected} missing");
+        }
+    }
 }
