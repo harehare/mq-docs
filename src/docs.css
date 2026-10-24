@@ -398,31 +398,14 @@ body {
   cursor: help;
 }
 
-/* The entry name is its permalink: click to open and copy the entry's URL */
+/* The entry name is its permalink */
 .entry-anchor {
-  position: relative;
   text-decoration: none;
 }
 
 .entry-anchor:hover {
   text-decoration: underline;
   text-underline-offset: 3px;
-}
-
-.entry-anchor.copied::after {
-  background-color: var(--bg-tertiary);
-  border-radius: 4px;
-  color: var(--text-primary);
-  content: "Copied";
-  font-family: "Montserrat", sans-serif;
-  font-size: 0.7rem;
-  font-weight: 600;
-  left: 100%;
-  margin-left: 0.5rem;
-  padding: 0.1rem 0.45rem;
-  position: absolute;
-  top: 50%;
-  transform: translateY(-50%);
 }
 
 .entry-aliases {

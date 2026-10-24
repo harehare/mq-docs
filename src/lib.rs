@@ -840,9 +840,9 @@ fn render_entry_html(item: &HtmlItem<'_>, group: &str, index: &LinkIndex) -> Str
     let ctx = LinkCtx { index, module: item.module, self_anchor: &item.anchor, params: &entry.params };
 
     let returns = signature_returns(entry).map(|r| format!(": {}", escape_html(r))).unwrap_or_default();
-    // The name is the permalink: clicking it selects the entry's URL and copies it.
+    // The name is the permalink: clicking it selects the entry's URL.
     let sig = format!(
-        "<a class=\"entry-name entry-anchor\" href=\"{}\" title=\"Copy link\">{}</a>({}){returns}",
+        "<a class=\"entry-name entry-anchor\" href=\"{}\">{}</a>({}){returns}",
         href_fragment(&item.anchor),
         escape_html(&entry.name),
         escape_html(&signature_params(entry))
