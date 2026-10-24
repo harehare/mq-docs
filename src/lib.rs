@@ -826,8 +826,7 @@ fn render_module_source_html(module_name: &str) -> String {
     let path = format!("crates/mq-lang/modules/{module_name}.mq");
     format!(
         "<p class=\"module-source\">Source: \
-         <a href=\"{REPO_URL}/blob/v{}/{path}\" target=\"_blank\" rel=\"noopener\">{module_name}.mq</a>\
-         <a href=\"{REPO_URL}/edit/main/{path}\" target=\"_blank\" rel=\"noopener\">Edit on GitHub</a></p>",
+         <a href=\"{REPO_URL}/blob/v{}/{path}\" target=\"_blank\" rel=\"noopener\">{module_name}.mq</a></p>",
         mq_version()
     )
 }
@@ -959,7 +958,7 @@ fn render_module_intro_html(m: &ModuleEntry) -> String {
     format!("<div class=\"module-intro\">{desc}{source}{examples}</div>")
 }
 
-/// Jump bar for a page: one link per group (a category, or a letter) that has an entry.
+/// Jump bar for an A–Z page: one link per letter that has an entry.
 fn render_jump_bar_html(groups: &[String], label: &str) -> String {
     let links = groups
         .iter()
@@ -1046,8 +1045,10 @@ fn build_entries_page(opts: &PageOptions<'_>, items: &[&HtmlItem<'_>], index: &L
         sections
             .iter()
             .map(|(group, members)| {
+                // A module's own heading (on the "All" page) is already a sidebar link.
+                let module_class = if members[0].rank >= builtin_category_count() { " entry-group-module" } else { "" };
                 format!(
-                    "<section class=\"entry-group\">\n\
+                    "<section class=\"entry-group{module_class}\">\n\
                      <h2 class=\"group-title\">{}<span class=\"group-count\">{}</span></h2>\n\
                      {}\n\
                      </section>",
@@ -1067,8 +1068,9 @@ fn build_entries_page(opts: &PageOptions<'_>, items: &[&HtmlItem<'_>], index: &L
         sections.iter().map(|(group, members)| entries_box_html(group, members, false, index)).join("\n")
     };
 
-    let jump_label = if grouped { "Jump to category" } else { "Jump to letter" };
-    let jump_bar = render_jump_bar_html(&groups, jump_label);
+    // Categories are listed under the page's sidebar link (built by the script); only the
+    // A–Z pages need a bar of their own.
+    let jump_bar = if grouped { String::new() } else { render_jump_bar_html(&groups, "Jump to letter") };
     let chips = render_chips_html(
         false,
         items.iter().any(|item| item.entry.capability.is_some()),
@@ -1503,7 +1505,7 @@ mod tests {
         let csv = render_module_source_html("csv");
         assert!(csv.contains("/blob/v"));
         assert!(csv.contains("/crates/mq-lang/modules/csv.mq\""));
-        assert!(csv.contains("/edit/main/crates/mq-lang/modules/csv.mq"));
+        assert!(!csv.contains("/edit/"));
 
         assert!(render_module_source_html("Built-in").is_empty());
         assert!(render_module_source_html("my/file.mq").is_empty());
@@ -1520,9 +1522,9 @@ mod tests {
 
         // Built-ins sit under category headings, other modules under their own name.
         assert!(html.contains("<h2 class=\"group-title\">Math &amp; Statistics<span"));
-        assert!(html.contains("<h2 class=\"group-title\">Type Checks<span"));
+        assert!(html.contains("<h2 class=\"group-title\">Types &amp; Logic<span"));
         assert!(html.contains("<h2 class=\"group-title\">csv<span"));
-        assert!(html.contains("data-group=\"Type Checks\""));
+        assert!(html.contains("data-group=\"Types &amp; Logic\""));
         // Deprecated entries get a warning card and class; selectors stay A–Z.
         assert!(html.contains("<div class=\"entry-warning\" role=\"note\"><strong>Deprecated</strong>"));
         assert!(html.contains("class=\"entry entry-deprecated\""));
@@ -1532,10 +1534,11 @@ mod tests {
             "https://mqlang.org/playground",
             "https://mqlang.org/book/cookbook",
             "https://mqlang.org/llms.txt",
-            "/edit/main/crates/mq-lang/modules/csv.mq",
+            "/blob/v",
             "id=\"globalSearch\"",
         ] {
             assert!(html.contains(expected), "{expected} missing");
         }
+        assert!(!html.contains("Edit on GitHub"));
     }
 }
