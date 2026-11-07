@@ -8,7 +8,7 @@ keywords = ["markdown", "jq", "query", "mq"]
 license = "MIT"
 name = "mq-docs"
 readme = "README.md"
-repository = "https://github.com/harehare/mq"
+repository = "https://github.com/harehare/mq-docs"
 version = "0.2.11"
 
 [dependencies]
