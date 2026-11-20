@@ -221,7 +221,7 @@ fn generic_module(module_name: &str) -> Result<ModuleEntry, miette::Error> {
                         kind: "function",
                         params: params
                             .iter()
-                            .map(|p| DocParam { name: p.name.to_string(), type_name: "dynamic".to_string() })
+                            .map(|p| DocParam { name: p.name.to_string(), type_name: "dynamic".to_string(), optional: p.has_default })
                             .collect(),
                         returns: "dynamic".to_string(),
                         description: doc.iter().map(|(_, d)| d.to_string()).join("\n"),
@@ -249,7 +249,7 @@ fn from_mq_fn_doc(f: mq_help::MqFnDoc, related_module: Option<String>) -> DocEnt
     DocEntry {
         name: f.name,
         kind: "function",
-        params: f.params.into_iter().map(|name| DocParam { name, type_name: "dynamic".to_string() }).collect(),
+        params: f.params.into_iter().map(|p| DocParam { name: p.name, type_name: "dynamic".to_string(), optional: p.optional }).collect(),
         returns: f.returns.unwrap_or_else(|| "dynamic".to_string()),
         description: f.description,
         examples: f.examples.into_iter().map(|e| DocExample { code: e.code, expected: e.expected }).collect(),
@@ -1355,7 +1355,7 @@ mod tests {
         DocEntry {
             name: name.to_string(),
             kind,
-            params: vec![DocParam { name: "path".to_string(), type_name: "string".to_string() }],
+            params: vec![DocParam { name: "path".to_string(), type_name: "string".to_string(), optional: false }],
             returns: "string".to_string(),
             description: String::new(),
             examples: Vec::new(),
@@ -1412,7 +1412,7 @@ mod tests {
         let modules = fixture();
         let layouts = layout_modules(&modules);
         let index = LinkIndex::new(&modules, &layouts);
-        let params = [DocParam { name: "path".to_string(), type_name: "string".to_string() }];
+        let params = [DocParam { name: "path".to_string(), type_name: "string".to_string(), optional: false }];
         let ctx = LinkCtx { index: &index, module: 1, self_anchor: "csv::csv_parse", params: &params };
 
         let html = render_description_html("Like `abs` or `csv::abs` or `.p`, not `path` or `csv_parse(x)`.", &ctx);
@@ -1479,8 +1479,8 @@ mod tests {
     fn signature_omits_dynamic_types() {
         let mut e = entry("add", "function", &[]);
         e.params = vec![
-            DocParam { name: "a".to_string(), type_name: "dynamic".to_string() },
-            DocParam { name: "n".to_string(), type_name: "number".to_string() },
+            DocParam { name: "a".to_string(), type_name: "dynamic".to_string(), optional: false },
+            DocParam { name: "n".to_string(), type_name: "number".to_string(), optional: false },
         ];
         e.returns = "dynamic".to_string();
         assert_eq!(signature_text(&e), "add(a, n: number)");
